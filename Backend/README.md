@@ -12,17 +12,17 @@ lobbystats/    매치메이킹 대기열 통계 산출 및 실시간 broadcast
 
 ## Services
 
-### [`adminproxy/`](./adminproxy/README_adminproxy.md) — Admin Gateway
+### [`adminproxy/`](./adminproxy/README.md) — Admin Gateway
 Internal network 전용 관리 microservice. HTTP request를 RabbitMQ 기반 RPC로 변환하여 Player Service, Session Manager, Gateway로 라우팅하고, 비동기 응답을 동기 HTTP response로 되돌려주는 request/response bridge입니다. `frameIdx` 기반 `context.Context` correlation으로 RabbitMQ의 pub/sub 모델과 HTTP의 동기 모델을 연결하는 것이 핵심 설계입니다.
 
 **핵심 사용처**: 운영진의 게임 데이터 갱신, 계정/캐릭터 조회·수정, 유지보수 상태 관리 등 admin tool의 backend.
 
-### [`botclient/`](./botclient/README_botclient.md) — Load Testing Simulator
+### [`botclient/`](./botclient/README.md) — Load Testing Simulator
 실제 게임 클라이언트와 동일하게 로비 진입 → JWT 인증 → gateway 연결 → RPC 시퀀스 실행이라는 전체 흐름을 다수의 가상 봇으로 동시 재현하는 부하 테스트 도구입니다. `RecvAck` 기반 self-throttling 스케줄러로 부하 테스트 도구 자신이 병목이 되지 않도록 설계되었으며, JSON 시나리오 파일만으로 부하 패턴을 코드 변경 없이 조정할 수 있습니다.
 
 **핵심 사용처**: 신규 빌드/인프라 변경 전 백엔드 스택 전체(Gateway, Lobby, Player Service)의 동시 접속 처리량 및 병목 검증.
 
-### [`lobbystats/`](./lobbystats/README_lobbystats.md) — Lobby Queue Telemetry
+### [`lobbystats/`](./lobbystats/README.md) — Lobby Queue Telemetry
 RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 처리 속도를 계산하고, 이를 STOMP를 통해 게임 클라이언트에 실시간 broadcast하는 소규모 microservice입니다. RabbitMQ의 pull 방식 관리 API와 클라이언트가 필요로 하는 push 방식 실시간 업데이트 사이의 격차를 메우는 adapter 역할을 합니다.
 
 **핵심 사용처**: 클라이언트 로비 화면의 "대기 인원 N명, 예상 대기 시간 M초" 표시를 위한 서버 측 데이터 소스.
@@ -65,8 +65,3 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 - **Configuration**: `spf13/viper`, command-line flag override
 - **Serialization**: `encoding/json`, 커스텀 byte-level frame codec, zlib 압축
 
----
-
-## Disclaimer
-
-본 문서는 포트폴리오 목적의 proprietary 게임 백엔드 microservice 모음에 대한 기술 개요입니다. `adminproxy`는 internal network 전용으로 운영되는 admin 시스템입니다. 소스는 architecture 및 코드 품질 리뷰 목적으로만 공개됩니다.
