@@ -12,17 +12,17 @@ lobbystats/    매치메이킹 대기열 통계 산출 및 실시간 broadcast
 
 ## Services
 
-### [`adminproxy/`](./adminproxy/README.md) — Admin Gateway
+### [`adminproxy/`](./adminproxy/README_adminproxy.md) — Admin Gateway
 Internal network 전용 관리 microservice. HTTP request를 RabbitMQ 기반 RPC로 변환하여 Player Service, Session Manager, Gateway로 라우팅하고, 비동기 응답을 동기 HTTP response로 되돌려주는 request/response bridge입니다. `frameIdx` 기반 `context.Context` correlation으로 RabbitMQ의 pub/sub 모델과 HTTP의 동기 모델을 연결하는 것이 핵심 설계입니다.
 
 **핵심 사용처**: 운영진의 게임 데이터 갱신, 계정/캐릭터 조회·수정, 유지보수 상태 관리 등 admin tool의 backend.
 
-### [`botclient/`](./botclient/README.md) — Load Testing Simulator
+### [`botclient/`](./botclient/README_botclient.md) — Load Testing Simulator
 실제 게임 클라이언트와 동일하게 로비 진입 → JWT 인증 → gateway 연결 → RPC 시퀀스 실행이라는 전체 흐름을 다수의 가상 봇으로 동시 재현하는 부하 테스트 도구입니다. `RecvAck` 기반 self-throttling 스케줄러로 부하 테스트 도구 자신이 병목이 되지 않도록 설계되었으며, JSON 시나리오 파일만으로 부하 패턴을 코드 변경 없이 조정할 수 있습니다.
 
 **핵심 사용처**: 신규 빌드/인프라 변경 전 백엔드 스택 전체(Gateway, Lobby, Player Service)의 동시 접속 처리량 및 병목 검증.
 
-### [`lobbystats/`](./lobbystats/README.md) — Lobby Queue Telemetry
+### [`lobbystats/`](./lobbystats/README_lobbystats.md) — Lobby Queue Telemetry
 RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 처리 속도를 계산하고, 이를 STOMP를 통해 게임 클라이언트에 실시간 broadcast하는 소규모 microservice입니다. RabbitMQ의 pull 방식 관리 API와 클라이언트가 필요로 하는 push 방식 실시간 업데이트 사이의 격차를 메우는 adapter 역할을 합니다.
 
 **핵심 사용처**: 클라이언트 로비 화면의 "대기 인원 N명, 예상 대기 시간 M초" 표시를 위한 서버 측 데이터 소스.
@@ -31,36 +31,19 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 
 ## Cross-Service Architecture
 
-```
-                         ┌─────────────────────────────────────────────┐
-                         │              Unreal Engine Client             │
-                         │           (OnlineSubsystemIcarus)             │
-                         └──────────┬─────────────────────┬─────────────┘
-                                    │ WebSocket                │ STOMP (Lobby)
-                                    ▼                           ▼
-                    ┌───────────────────────┐      ┌────────────────────┐
-                    │   Gateway / Player      │      │   lobbystats        │
-                    │   Service / Session      │◀────▶│   (대기열 통계)      │
-                    │   Manager (별도 repo)     │      └──────────┬─────────┘
-                    └───────────┬─────────────┘                 │
-                                │  RabbitMQ                       │ RabbitMQ
-                                │  (PL / SM / GW / AP exchange)   │ Management API
-                                ▼                                ▼
-                    ┌───────────────────────┐         ┌──────────────────┐
-                    │   adminproxy            │         │   RabbitMQ         │
-                    │   (관리자 RPC gateway)    │────────▶│   (broker)          │
-                    └───────────▲─────────────┘         └──────────────────┘
-                                │ HTTP (internal only)
-                                │
-                    ┌───────────────────────┐
-                    │   Admin Tool (사내 운영)  │
-                    └───────────────────────┘
+### Deployment topology
 
-   botclient는 위 전체 경로(Lobby → Gateway → 각 서비스)를 독립적으로
-   재현하여 부하를 발생시키는 별도의 클라이언트 시뮬레이터로 동작합니다.
-```
+![Icarus backend deployment topology](./architecture/diagram1.png)
 
-세 서비스는 서로 직접 호출하지 않고 **RabbitMQ를 매개로 한 exchange/queue 바인딩**으로만 결합되어 있어, 개별 배포·재시작·장애가 다른 서비스에 직접적인 컴파일/런타임 의존성을 만들지 않습니다. 서비스 간 공유되는 계약은 `shared.go`의 exchange 이름 상수와, 클라이언트-서버 양측에 동일하게 구현된 **byte-level wire protocol**(`EventName\nheader:value\n\nBody`) 두 가지로 좁게 유지됩니다.
+전체 백엔드가 Kubernetes 클러스터(Microsoft Azure) 위에서 어떻게 배치되는지를 보여주는 실제 배포 아키텍처입니다. `Gateway`, `SessionManager`, `PlayerService`, `Scheduler`, `AdminProxy`가 RabbitMQ를 중심으로 서로 연결되며, `SessionManager`는 Redis, `PlayerService`/`Scheduler`는 MySQL을 데이터 저장소로 사용합니다. Prometheus + RabbitMQ Exporter/Adaptor로 메시지 브로커와 서비스 상태를 모니터링하고, Azure Blob Storage가 게임 콘텐츠 서버(Content Server) 역할을, Azure Key Vault가 비밀 관리를 담당합니다. `AdminProxy`는 Azure Logic Apps를 통해 운영 알림·자동화 워크플로우와 연결됩니다. 클라이언트는 Steam/Epic Games 같은 서드파티 플랫폼을 거쳐 이 Kubernetes 클러스터의 `Gateway`로 진입합니다.
+
+### Client-to-backend relationship
+
+![Icarus client, backend, and third-party platform relationship](./architecture/diagram2.png)
+
+클라이언트 관점에서 바라본 상위 레벨 구조입니다. 게임 클라이언트는 두 개의 독립적인 backend 축과 연결됩니다: 하나는 `Icarus Backend`의 `Gateway`(이 저장소의 서비스들이 속한 자체 백엔드), 다른 하나는 Steam/Epic 등 `Third party OnlineSubsystem`을 경유하는 `Third party platform`(Auth, Friends, Messenger, Leaderboards 등 플랫폼 제공 서비스)입니다. `OnlineSubsystemIcarus`(Unreal 클라이언트 플러그인)는 이 두 축을 모두 추상화하여 게임 코드에 노출하며, 이 저장소의 microservice들은 그중 왼쪽 축(`Icarus Backend`)의 서버 측 구현체에 해당합니다.
+
+세 서비스(`adminproxy`, `botclient`, `lobbystats`)는 서로 직접 호출하지 않고 **RabbitMQ를 매개로 한 exchange/queue 바인딩**으로만 결합되어 있어, 개별 배포·재시작·장애가 다른 서비스에 직접적인 컴파일/런타임 의존성을 만들지 않습니다. 서비스 간 공유되는 계약은 exchange 이름 상수와, 클라이언트-서버 양측에 동일하게 구현된 **byte-level wire protocol**(`EventName\nheader:value\n\nBody`) 두 가지로 좁게 유지됩니다. `botclient`는 위 두 다이어그램의 `Gateway` 진입 경로 전체(로비 → 인증 → RPC)를 독립적인 시뮬레이터로 재현하여 부하를 발생시키는 역할을 합니다.
 
 ---
 
