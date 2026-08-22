@@ -53,7 +53,7 @@ void GameServer::OnPacket(std::shared_ptr<Session> session, proto::PacketType ty
 // ================================================================
 // 회원가입
 //   흐름: IoWorker 스레드에서 패킷 파싱 -> DB 작업을 DBWorkerPool에 위임
-//         -> DB 워커 스레드에서 쿼리 실행 -> 완료 후 NetServer::SendPacket으로 응답
+//         -> DB worker 스레드에서 쿼리 실행 -> 완료 후 NetServer::SendPacket으로 응답
 //   (SendPacket은 어느 스레드에서 호출해도 안전하게 설계되어 있음)
 // ================================================================
 void GameServer::HandleRegister(std::shared_ptr<Session> session, const char* body, size_t bodySize) {
@@ -256,7 +256,7 @@ void GameServer::HandleChatMessage(std::shared_ptr<Session> session, const char*
     auto packet = writer.Finalize();
 
     // 브로드캐스트는 네트워크 I/O이므로 DB 스레드가 아니라 이 IoWorker 스레드에서 바로 처리.
-    // (SendPacket이 내부적으로 대상 세션이 속한 워커에 안전하게 큐잉하므로 스레드 경계를 넘어도 안전)
+    // (SendPacket이 내부적으로 대상 세션이 속한 worker에 안전하게 큐잉하므로 스레드 경계를 넘어도 안전)
     netServer_.BroadcastPacket(sessionManager_, packet);
 
     // 채팅 로그를 DB에 비동기로 적재 (분석/신고 대응용, 실패해도 서비스에 영향 없도록 fire-and-forget)

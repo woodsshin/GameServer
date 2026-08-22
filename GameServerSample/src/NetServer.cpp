@@ -23,7 +23,7 @@ IoWorker::IoWorker(int workerIndex, SessionManager& sessionManager, PacketHandle
         throw std::runtime_error("epoll_create1 실패");
     }
 
-    // eventfd: 다른 스레드가 이 워커의 epoll_wait를 깨울 때 사용하는 통지 채널
+    // eventfd: 다른 스레드가 이 worker의 epoll_wait를 깨울 때 사용하는 통지 채널
     wakeupEventFd_ = eventfd(0, EFD_NONBLOCK);
     if (wakeupEventFd_ < 0) {
         throw std::runtime_error("eventfd 생성 실패");
@@ -79,7 +79,7 @@ void IoWorker::Run() {
     constexpr int MAX_EVENTS = 256;
     std::vector<epoll_event> events(MAX_EVENTS);
 
-    // fd -> Session 매핑은 워커 스레드 하나만 접근하므로 락 불필요 (fd는 워커 간 공유되지 않음)
+    // fd -> Session 매핑은 worker 스레드 하나만 접근하므로 lock 불필요 (fd는 worker 간 공유되지 않음)
     std::unordered_map<int, std::shared_ptr<Session>> localSessions;
 
     while (running_) {
@@ -107,7 +107,7 @@ void IoWorker::Run() {
                     writeFds.swap(pendingWriteFds_);
                 }
 
-                // 신규 소켓을 이 워커의 epoll에 등록
+                // 신규 소켓을 이 worker의 epoll에 등록
                 for (int newFd : newFds) {
                     uint64_t sessionId = nextSessionId_.fetch_add(1);
                     auto session = std::make_shared<Session>(newFd, sessionId);
@@ -164,7 +164,7 @@ void IoWorker::Run() {
         }
     }
 
-    // 워커 종료 시 남은 세션 정리
+    // worker 종료 시 남은 세션 정리
     for (auto& [fd, session] : localSessions) {
         sessionManager_.Remove(session->GetSessionId());
         close(fd);
@@ -316,7 +316,7 @@ bool NetServer::Start() {
     int opt = 1;
     setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     // SO_REUSEPORT를 쓰면 accept 자체를 멀티스레드로 분산할 수도 있으나,
-    // 여기서는 accept 스레드 1개 + 워커 분배 구조를 명확히 보여주기 위해 미사용.
+    // 여기서는 accept 스레드 1개 + worker 분배 구조를 명확히 보여주기 위해 미사용.
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -342,7 +342,7 @@ bool NetServer::Start() {
     running_ = true;
     acceptThread_ = std::thread(&NetServer::AcceptLoop, this);
 
-    printf("[NetServer] 포트 %d 에서 리스닝 시작 (워커 %zu개)\n", port_, workers_.size());
+    printf("[NetServer] 포트 %d 에서 리스닝 시작 (worker %zu개)\n", port_, workers_.size());
     return true;
 }
 
@@ -398,7 +398,7 @@ void NetServer::AcceptLoop() {
                 int nodelay = 1;
                 setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-                // 라운드로빈으로 워커 선택 -> 대용량 유저를 코어 수만큼 수평 분산
+                // 라운드로빈으로 worker 선택 -> 대용량 유저를 코어 수만큼 수평 분산
                 size_t idx = nextWorkerRoundRobin_.fetch_add(1) % workers_.size();
                 {
                     std::lock_guard<std::mutex> lock(fdWorkerMapMutex_);
@@ -422,7 +422,7 @@ void NetServer::SendPacket(std::shared_ptr<Session> session, std::vector<char> p
 
     bool becameNonEmpty = session->EnqueueSend(std::move(packetData));
     if (!becameNonEmpty) {
-        return; // 이미 flush 진행 중이던 큐라면, 해당 워커가 알아서 마저 보냄
+        return; // 이미 flush 진행 중이던 큐라면, 해당 worker가 알아서 마저 보냄
     }
 
     int fd = session->GetFd();

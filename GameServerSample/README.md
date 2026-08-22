@@ -7,25 +7,25 @@ epoll 기반 비동기 I/O, DB 커넥션 풀, 스레드 분리 아키텍처로 �
 
 ## 핵심 설계 포인트
 
-### 1. Accept 스레드 / IO 워커 스레드 분리
+### 1. Accept 스레드 / IO worker 스레드 분리
 ```
 [Accept Thread]  --accept()--> 라운드로빈 분배 --> [IoWorker 0] [IoWorker 1] ... [IoWorker N]
                                                        (epoll)      (epoll)         (epoll)
 ```
-- Accept 전용 스레드가 `listen` 소켓만 전담하여 감시합니다. 워커 스레드가 트래픽 처리로 부하가 높은 상태에서도 신규 연결 수락(accept)이 지연되지 않습니다.
-- 각 IoWorker는 **독립된 epoll 인스턴스**를 보유합니다. 단일 epoll 인스턴스에 전체 파일 디스크립터를 모아 처리하는 구조와 비교해 락 경합이 발생하지 않으며, CPU 코어 수에 비례한 수평 확장(`std::thread::hardware_concurrency()` 기준 워커 수 결정)이 가능합니다.
-- 신규 소켓 등록, 쓰기 요청 등 스레드 경계를 넘나드는 통지는 `eventfd`와 `epoll_wait`를 조합해 처리하여, 워커 스레드가 불필요한 폴링 없이 이벤트 기반으로만 활성화됩니다.
+- Accept 전용 스레드가 `listen` 소켓만 전담하여 감시합니다. worker 스레드가 트래픽 처리로 부하가 높은 상태에서도 신규 연결 수락(accept)이 지연되지 않습니다.
+- 각 IoWorker는 **독립된 epoll 인스턴스**를 보유합니다. 단일 epoll 인스턴스에 전체 파일 디스크립터를 모아 처리하는 구조와 비교해 락 경합이 발생하지 않으며, CPU 코어 수에 비례한 수평 확장(`std::thread::hardware_concurrency()` 기준 worker 수 결정)이 가능합니다.
+- 신규 소켓 등록, 쓰기 요청 등 스레드 경계를 넘나드는 통지는 `eventfd`와 `epoll_wait`를 조합해 처리하여, worker 스레드가 불필요한 폴링 없이 이벤트 기반으로만 활성화됩니다.
 
 ### 2. DB 비동기 처리 (Head-of-Line Blocking 회피)
 IoWorker 스레드가 로그인/회원가입 처리 중 블로킹 방식의 MySQL 쿼리를 직접 호출할 경우, 해당 스레드에 연결된 **다른 모든 소켓**의 이벤트 처리가 쿼리 응답 대기 시간만큼 지연됩니다(Head-of-Line Blocking). 이를 방지하기 위해 다음과 같은 파이프라인을 구성했습니다.
 
 ```
 IoWorker 스레드: 패킷 파싱 → DBTask(람다) 생성 → DBWorkerPool 큐에 Enqueue → 즉시 다음 이벤트 처리
-DB 워커 스레드:   큐에서 Task Pop → 커넥션 풀에서 커넥션 대여 → 쿼리 실행 → NetServer::SendPacket으로 응답
+DB worker 스레드:   큐에서 Task Pop → 커넥션 풀에서 커넥션 대여 → 쿼리 실행 → NetServer::SendPacket으로 응답
 ```
 - `DBConnectionPool`: `MYSQL*` 커넥션 N개를 사전에 생성해두는 풀과, RAII 가드(`ScopedConnection`)를 통한 반납 누락 방지 로직으로 구성됩니다.
-- `DBWorkerPool`: `ThreadSafeQueue<DBTask>` 기반의 작업 큐와 워커 스레드 풀로 구성되며, Prepared Statement를 사용해 SQL Injection을 차단합니다.
-- `NetServer::SendPacket`은 호출 스레드에 관계없이 안전하게 동작합니다. 세션의 송신 큐는 mutex로 보호되며, 대상 세션이 속한 워커에는 `eventfd`를 통해 쓰기 이벤트가 통지됩니다.
+- `DBWorkerPool`: `ThreadSafeQueue<DBTask>` 기반의 작업 큐와 worker 스레드 풀로 구성되며, Prepared Statement를 사용해 SQL Injection을 차단합니다.
+- `NetServer::SendPacket`은 호출 스레드에 관계없이 안전하게 동작합니다. 세션의 송신 큐는 mutex로 보호되며, 대상 세션이 속한 worker에는 `eventfd`를 통해 쓰기 이벤트가 통지됩니다.
 
 ### 3. 패킷 프로토콜 및 스트림 처리
 - `[4B TotalSize][2B PacketType][Body]` 구조의 길이 기반 바이너리 프로토콜을 사용합니다.
@@ -49,7 +49,7 @@ include/
   PacketDef.h          # 패킷 헤더 및 직렬화(Writer/Reader)
   ThreadSafeQueue.h     # 범용 스레드 세이프 큐 (DB 작업 큐 등에 사용)
   DBConnectionPool.h    # MySQL 커넥션 풀 (RAII 가드 포함)
-  DBWorker.h             # DB 비동기 작업 큐 및 워커 스레드 풀
+  DBWorker.h             # DB 비동기 작업 큐 및 worker 스레드 풀
   Session.h              # 클라이언트 세션 (수신 버퍼, 송신 큐)
   SessionManager.h       # 전체 세션 컨테이너 (shared_mutex)
   NetServer.h            # epoll 기반 네트워크 코어 (Accept/IoWorker)
@@ -123,7 +123,7 @@ DB_HOST=127.0.0.1 DB_USER=gameapp DB_PASSWORD=yourpassword DB_NAME=game_server \
   p50 1ms 미만을 유지 — 설계 의도대로 병목이 되지 않음을 확인했습니다.
 - **회원가입/로그인 처리량이 동시 접속 수와 무관하게 27.5 req/sec로 고정**되는 현상을
   발견하고, 원인이 `PasswordHash.h`의 SHA-256 스트레칭(10,000라운드, 1회 약 15.7ms
-  소요)에 따른 CPU 포화임을 워커 스레드 증량 테스트와 라운드 축소 대조군 테스트로
+  소요)에 따른 CPU 포화임을 worker 스레드 증량 테스트와 라운드 축소 대조군 테스트로
   교차 검증했습니다.
 - 스트레칭 라운드를 1,000으로 낮춘 대조군에서는 1,000명 동시 접속 기준 회원가입
   성공률 92.3% → 100%, 지연 p50 7.65초 → 0.54초(약 14배 개선)로 확인되어, 병목 지점과
@@ -152,9 +152,9 @@ LOAD_TEST_STAGES="100 300 600 1000" \
 | 비밀번호 해싱 | SHA-256 + salt + 스트레칭 10,000라운드 (실측: 1회 약 15.7ms, 1,000 동시 접속 시 회원가입 처리량이 27.5 req/sec로 고정되는 CPU 병목 확인됨 — [부하 테스트 리포트](./LOAD_TEST_REPORT.md) 참고) | bcrypt 또는 Argon2 등 검증된 전용 해싱 라이브러리로 대체, 또는 스트레칭 라운드를 보안 요구 수준에 맞게 하향 조정 |
 
 ## 적용된 기술
-- **네트워크**: epoll 기반 비동기 논블로킹 I/O, 다중 epoll 인스턴스를 통한 워커 수평 확장, eventfd를 이용한 스레드 간 통지, 부분 송수신(short read/write) 처리, TCP_NODELAY 적용 근거에 대한 이해.
-- **비동기 설계**: Head-of-Line Blocking을 회피하기 위해 블로킹 방식의 DB 호출을 별도 워커 풀로 분리한 설계 의도와 트레이드오프에 대한 설명 능력.
+- **네트워크**: epoll 기반 비동기 논블로킹 I/O, 다중 epoll 인스턴스를 통한 worker 수평 확장, eventfd를 이용한 스레드 간 통지, 부분 송수신(short read/write) 처리, TCP_NODELAY 적용 근거에 대한 이해.
+- **비동기 설계**: Head-of-Line Blocking을 회피하기 위해 블로킹 방식의 DB 호출을 별도 worker 풀로 분리한 설계 의도와 트레이드오프에 대한 설명 능력.
 - **동시성 제어**: `shared_mutex`를 활용한 읽기 위주 연산 최적화, 락 보유 시간 최소화(스냅샷 후 락 해제) 패턴, RAII 기반 리소스 관리(커넥션 풀, 세션 종료).
 - **데이터베이스**: Prepared Statement 적용, 커넥션 풀링, 조회 패턴을 고려한 인덱스 설계(`idx_created_at` 등).
 - **보안**: salt 및 해시 스트레칭 적용, SQL Injection 방지, 악성 패킷에 대한 방어(크기 검증, 버퍼 오버플로우 방지).
-- **성능 분석 및 검증**: 자체 제작 비동기 부하 생성기로 실제 서버를 기동해 대용량 동시 접속을 실측, 병목 지점(CPU 바운드 vs I/O 바운드)을 워커 스레드 증량 테스트와 대조군 비교로 교차 검증하는 성능 프로파일링 방법론.
+- **성능 분석 및 검증**: 자체 제작 비동기 부하 생성기로 실제 서버를 기동해 대용량 동시 접속을 실측, 병목 지점(CPU 바운드 vs I/O 바운드)을 worker 스레드 증량 테스트와 대조군 비교로 교차 검증하는 성능 프로파일링 방법론.

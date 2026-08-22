@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        // 메인 스레드는 대기 (accept/io/db 워커 스레드들이 실제 작업 수행)
+        // 메인 스레드는 대기 (accept/io/db worker 스레드들이 실제 작업 수행)
         while (true) {
             std::this_thread::sleep_for(std::chrono::seconds(60));
         }

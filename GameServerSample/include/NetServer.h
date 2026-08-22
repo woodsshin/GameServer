@@ -15,18 +15,18 @@
 // 스레드 구성:
 //   1) Accept 스레드 (1개)
 //        - listen 소켓만 담당. accept()로 새 연결이 들어오면
-//          워커 스레드 풀 중 하나에 라운드로빈으로 소켓을 분배.
+//          worker 스레드 풀 중 하나에 라운드로빈으로 소켓을 분배.
 //        - accept 자체를 별도 스레드로 분리한 이유:
-//          워커 스레드들이 대량 트래픽 처리로 바쁠 때도
+//          worker 스레드들이 대량 트래픽 처리로 바쁠 때도
 //          신규 접속 수락이 지연되지 않도록 하기 위함.
 //
-//   2) IO 워커 스레드 (N개, CPU 코어 수 기반)
+//   2) IO worker 스레드 (N개, CPU 코어 수 기반)
 //        - 각자 독립된 epoll 인스턴스를 가짐 (epoll fd 1개씩)
 //        - 자신에게 할당된 소켓들의 EPOLLIN/EPOLLOUT 이벤트 처리
-//        - 이렇게 fd를 워커별로 분산시키면 단일 epoll에 락 경합이
+//        - 이렇게 fd를 worker별로 분산시키면 단일 epoll에 락 경합이
 //          생기는 구조를 피하고, 코어 수만큼 수평 확장 가능
 //
-//   3) DB 워커 스레드 (DBWorkerPool, 별도 클래스)
+//   3) DB worker 스레드 (DBWorkerPool, 별도 클래스)
 //        - 회원가입/로그인 등 블로킹 쿼리를 IO 스레드 밖에서 처리
 //
 // 패킷이 완성되면 PacketHandler 콜백으로 전달 (비즈니스 로직은
@@ -43,7 +43,7 @@ public:
     void Start();
     void Stop();
 
-    // accept 스레드가 새 fd를 이 워커에 등록 요청
+    // accept 스레드가 새 fd를 이 worker에 등록 요청
     void RegisterNewSession(int fd);
 
     // 다른 스레드(브로드캐스트 등)에서 특정 세션에 쓰기 이벤트를 걸고 싶을 때
@@ -105,7 +105,7 @@ private:
     SessionManager& sessionManager_;
     PacketHandler packetHandler_;
 
-    // fd -> workerIndex 매핑 (송신 시 어느 워커의 epoll에 EPOLLOUT 걸어야 하는지 알기 위함)
+    // fd -> workerIndex 매핑 (송신 시 어느 worker의 epoll에 EPOLLOUT 걸어야 하는지 알기 위함)
     std::mutex fdWorkerMapMutex_;
     std::unordered_map<int, int> fdToWorkerIndex_;
 };
