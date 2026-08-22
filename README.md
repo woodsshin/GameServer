@@ -49,7 +49,7 @@ epoll 기반 비동기 I/O, DB Connection Pool, Thread 분리 Architecture로 �
 - **동시성 제어**: `shared_mutex`로 읽기 위주 연산(Broadcast)의 동시 진입을 허용하고, Snapshot 후 즉시 Lock을 해제하는 패턴으로 Lock 보유 시간을 최소화했습니다.
 - **보안**: salt + SHA-256 Stretching(10,000 round) 기반 비밀번호 해싱, Prepared Statement로 SQL Injection 차단.
 
-**실측 검증**: 자체 제작 비동기 Load Test 도구로 최대 1,000명 동시 접속을 실측했습니다. 접속·Broadcast 계층은 병목 없이 100% 성공률을 유지했으나, 회원가입/로그인 처리량이 27.5 req/sec로 고정되는 현상을 발견하고 원인이 SHA-256 Stretching에 따른 CPU 포화임을 대조군 테스트로 교차 검증했습니다(Stretching Round 축소 시 성공률 92.3% → 100%, 지연 p50 약 14배 개선). 방법론과 전체 수치는 하위 [`LOAD_TEST_REPORT.md`](./GameServerSample/LOAD_TEST_REPORT.md)에 정리되어 있습니다.
+**실측 검증**: 자체 제작 비동기 Load Test 도구로 최대 1,000명 동시 접속을 실측했습니다. 접속·Broadcast 계층은 병목 없이 100% 성공률을 유지했으나, 회원가입/로그인 처리량이 27.5 req/sec로 고정되는 현상을 발견하고 원인이 SHA-256 Stretching에 따른 CPU 포화임을 대조군 테스트로 교차 검증했습니다(Stretching Round 축소 시 성공률 92.3% → 100%, 지연 p50 약 14배 개선). 방법론과 전체 수치는 하위 [`report/README.txt`](./GameServerSample/report/README.txt)에 정리되어 있습니다.
 
 → 자세한 내용은 [GameServerSample/README.md](./GameServerSample/README.md) 참고.
 
@@ -92,8 +92,9 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, 게임 Client�
 ├── README.md                                   (본 문서)
 ├── GameServerSample/
 │   ├── README.md
-│   ├── LOAD_TEST_REPORT.md
-│   ├── include/ src/ sql/ tools/ report/
+│   ├── include/ src/ sql/ tools/
+│   ├── report/
+│   │   └── README.txt
 │   └── CMakeLists.txt
 └── UnrealPlugins/
     ├── OnlineSubsystemEOS/
