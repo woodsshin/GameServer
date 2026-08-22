@@ -67,9 +67,3 @@ RabbitMQ (STOMP) ◀──(WsMessage encoding)── lobbystats
 - **HTTP Routing**: `gorilla/mux`
 - **Transport Security**: TLS (`crypto/tls`)
 - **Serialization**: `encoding/json`, 커스텀 byte-level frame codec
-
----
-
-## Disclaimer
-
-본 문서는 포트폴리오 목적의 proprietary 게임 백엔드 microservice에 대한 기술 개요입니다. 소스는 architecture 및 코드 품질 리뷰 목적으로만 공개됩니다.
