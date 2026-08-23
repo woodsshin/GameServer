@@ -1,6 +1,6 @@
 # botclient
 
-게임 백엔드 **부하 테스트(load test)**를 위한 Go 기반 시뮬레이션 클라이언트입니다. 실제 Unreal Engine 게임 클라이언트가 수행하는 로비 진입 → 인증 → gateway 연결 → RPC 시퀀스 실행 전 과정을 다수의 가상 봇으로 동시에 재현하여, `OnlineSubsystemIcarus`가 통신하는 백엔드 스택(Gateway, Lobby, Player Service 등) 전체를 end-to-end로 부하 검증합니다.
+게임 백엔드 **부하 테스트**(load test)를 위한 Go 기반 시뮬레이션 클라이언트입니다. 실제 Unreal Engine 게임 클라이언트가 수행하는 로비 진입 → 인증 → gateway 연결 → RPC 시퀀스 실행 전 과정을 다수의 가상 봇으로 동시에 재현하여, `OnlineSubsystemIcarus`가 통신하는 백엔드 스택(Gateway, Lobby, Player Service 등) 전체를 end-to-end로 부하 검증합니다.
 
 ---
 
@@ -45,7 +45,7 @@ botrequest.json (시나리오 정의)
 - **`generateRequest`**: 시나리오의 `EventName`을 실제 RPC request struct(`model.ReqXxx`)로 매핑하는 대규모 switch 문. 캐릭터 생성, 인벤토리 조회, 워크숍 아이템 구매, 드롭십 구성, Prospect(탐사) 생성/갱신/정산 등 게임의 핵심 도메인 이벤트를 폭넓게 커버.
 - **`generateProspect`**: 매 반복마다 payload 크기를 누적 증가시키는 더미 바이너리 데이터를 생성하고 SHA-1 해시 계산, zlib 압축, base64 인코딩까지 거쳐 `ReqUpdateProspect`를 구성 — 실제 세이브 데이터 동기화 트래픽의 크기·빈도 특성을 재현하기 위한 합성 부하(synthetic load) 생성 로직.
 - **`proceedNextMessage`**: 매 tick마다 모든 봇을 순회하며 상태를 전진시키는 핵심 스케줄러.
-  - `RecvAck`(이전 요청 응답 수신 여부)와 `ReqIdx`(현재 진행 인덱스)를 확인하여, 응답을 받은 봇만 다음 요청을 전송 — **요청 오버랩 없이 gateway 응답 속도에 맞춰 자연스럽게 스로틀링**되는 구조.
+  - `RecvAck`(이전 요청 응답 수신 여부)와 `ReqIdx`(현재 진행 인덱스)를 확인하여, 응답을 받은 봇만 다음 요청을 전송 — **요청 간 오버랩을 방지하고 게이트웨이(Gateway) 응답 속도에 맞춰 자연스럽게 스로틀링(Throttling)되는 구조**.
   - 각 이벤트에 설정된 `Delay`를 경과 시간과 비교해 지연 후 발송을 구현.
   - 시나리오를 모두 소진하면 `Repeat` 카운트에 따라 처음부터 재시작하거나, 완전히 종료 시 `NeedReset` 플래그로 로비 재접속(새 세션 시뮬레이션)을 트리거.
   - 활성 요청이 없는 유휴 상태에서는 20초 간격 `ReqPing`으로 연결 유지.
