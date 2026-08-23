@@ -119,7 +119,7 @@ DB_HOST=127.0.0.1 DB_USER=gameapp DB_PASSWORD=yourpassword DB_NAME=game_server \
 
 ## 부하 테스트: 대용량 동시 접속 처리 검증
 
-`tools/load_test.py`(자체 제작 비동기 부하 생성기)로 실제 서버를 빌드·기동한 뒤
+`report/load_test.py`(자체 제작 비동기 부하 생성기)로 실제 서버를 빌드·기동한 뒤
 100 ~ 1,000명 동시 접속 시나리오를 직접 실측했습니다. 자세한 방법론과 전체 수치는
 [`report/README.md`](./GameServerSample/report/README.md)에 정리되어 있으며, 핵심 결과는 다음과 같습니다.
 
