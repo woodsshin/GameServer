@@ -234,7 +234,7 @@ void UAddPortCallbackProxy::Activate()
 - **Port Mapping 추가/삭제**: `AddPortMapping` / `DeletePortMapping` SOAP Action으로 TCP/UDP Port 자동 개방
 - **External IP / 연결 상태 조회**: `GetExternalIPAddress`, `GetStatusInfo`, `GetCommonLinkProperties` 등으로 현재 Public IP·회선 상태 확인
 - **현재 Mapping 목록 조회**: `GetGenericPortMappingEntry`로 이미 등록된 Port Mapping 전체 열람
-- **Blueprint 완전 지원**: 모든 기능이 `BlueprintCallable` / Latent Node로 노출되어 C++ 없이 사용 가능
+- **Blueprint 지원**: 모든 기능이 `BlueprintCallable` / Latent Node로 노출되어 C++ 없이 사용 가능
 - **자동 Retry & Timeout**: Request 단계별 실패 시 최대 Retry 횟수까지 자동 복구 시도
 - **비동기 Thread 처리**: Socket 송수신을 Game Thread와 분리해 Frame Drop 없이 동작
 

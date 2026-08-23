@@ -124,7 +124,7 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 - **경량 Parser**: 정규 XML Parser 대신 Tag 사이 문자열을 추출하는 자체 Parser(`ExtractMessage`)로 Library 의존성 없이 Router Firmware별 Response Format 편차에 대응합니다.
 - **State Machine & 자동 Retry**: `UPNPState` Enum으로 현재 단계를 추적하며, 응답 유실이나 다중 IGD 환경에서 실패 시 다음 Device로 넘어가며 자동 Retry합니다.
 - **Thread 분리**: `FRunnable` 기반 전용 Worker Thread가 SSDP Multicast 송수신을 전담해, Game Thread Blocking 없이 비동기로 동작합니다.
-- **Blueprint 완전 지원**: `UBlueprintAsyncActionBase` 기반 CallbackProxy 계열(`UAddPortCallbackProxy` 등)로 Latent Node 한 번 호출로 Port 추가/삭제부터 성공/실패 Callback까지 이어지도록 설계해, Designer가 UPnP Protocol을 몰라도 사용할 수 있습니다.
+- **Blueprint 지원**: `UBlueprintAsyncActionBase` 기반 CallbackProxy 계열(`UAddPortCallbackProxy` 등)로 Latent Node 한 번 호출로 Port 추가/삭제부터 성공/실패 Callback까지 이어지도록 설계해, Designer가 UPnP Protocol을 몰라도 사용할 수 있습니다.
 
 → 자세한 내용은 [UnrealPlugins/SimpleUPNP/README.md](./UnrealPlugins/SimpleUPNP/README.md) 참고.
 
