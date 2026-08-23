@@ -6,6 +6,8 @@ Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음입니다. 
 adminproxy/    관리자용 HTTP → RabbitMQ RPC gateway (internal network 전용)
 botclient/     부하 테스트를 위한 게임 클라이언트 시뮬레이터
 lobbystats/    매치메이킹 대기열 통계 산출 및 실시간 broadcast
+
+match-making/  (Icarus와 무관) Seedworld 프로젝트의 AWS GameLift 매치메이킹 서비스
 ```
 
 ---
@@ -26,6 +28,13 @@ Internal network 전용 관리 microservice. HTTP request를 RabbitMQ 기반 RPC
 RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 처리 속도를 계산하고, 이를 STOMP를 통해 게임 클라이언트에 실시간 broadcast하는 소규모 microservice입니다. RabbitMQ의 pull 방식 관리 API와 클라이언트가 필요로 하는 push 방식 실시간 업데이트 사이의 격차를 메우는 adapter 역할을 합니다.
 
 **핵심 사용처**: 클라이언트 로비 화면의 "대기 인원 N명, 예상 대기 시간 M초" 표시를 위한 서버 측 데이터 소스.
+
+### [`match-making/`](./match-making/README.md) — GameLift Matchmaking (Seedworld, 별도 프로젝트)
+> ⚠️ 위 세 서비스(`adminproxy`, `botclient`, `lobbystats`)와 달리 **Icarus** 백엔드 서비스가 **Seedworld**의 백엔드 서비스이며, Go/RabbitMQ 스택이 아닌 **C#(ASP.NET Core) 기반 gRPC 서비스**로 AWS GameLift와 직접 연동합니다. 편의상 이 저장소에 함께 보관되어 있을 뿐, 위 Cross-Service Architecture·Shared Design Patterns 섹션과는 무관합니다.
+
+게임 클라이언트(EOS 인증)와 데디케이티드 서버(S2S 인증) 양쪽의 요청을 받아 AWS GameLift 상에서 빈 슬롯이 있는 게임 세션을 검색하거나, 없으면 FlexMatch로 신규 매치메이킹을 시작하고 세션을 배치하는 서비스입니다.
+
+**핵심 사용처**: Seedworld 게임 클라이언트/데디케이티드 서버의 매치메이킹 및 게임 세션·플레이어 세션 생성.
 
 ---
 

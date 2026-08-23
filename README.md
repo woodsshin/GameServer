@@ -2,21 +2,21 @@
 
 Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 모음입니다. 각 프로젝트는 독립된 Repository처럼 구성되어 있으며, 하단 링크에서 세부 구현과 검증 결과를 확인할 수 있습니다.
 
-**GameServerSample**은 Unreal Engine과 무관하게 Claude Code를 활용해 작성한 순수 C++ Game Server 예제이고, **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 작성한 microservice만 추가하였습니다.
+**GameServerSample**은 Unreal Engine과 무관하게 Claude Code를 활용해 작성한 순수 C++ Game Server 예제이고, **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 작성한 microservice를 중심으로 설명하였습니다.
 
 | Project | 요약 | Stack |
 |---|---|---|
 | [GameServerSample](./GameServerSample/README.md) | epoll 기반 비동기 Game Server. DB Connection Pool과 Thread 분리 Architecture로 대규모 동시 접속을 처리 | C++, epoll, MySQL, pthread |
-| [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README.md) | Epic Online Services를 Unreal Engine의 표준 `OnlineSubsystem` Interface로 wrapping한 Native Code Plugin | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/OnlineSubsystemIcarus](./UnrealPlugins/OnlineSubsystemIcarus/README.md) | 자체 Game Backend(Icarus)를 UE `OnlineSubsystem` Interface로 연동하는 Native Code Plugin. WebSocket RPC와 STOMP 기반 Lobby Messaging을 직접 구현 | Unreal Engine, C++, WebSocket, STOMP |
-| [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
 | [Backend](./Backend/README.md) | Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음. RabbitMQ를 공용 message bus로 사용하는 독립 배포 구조 | Go, RabbitMQ(AMQP/STOMP), Kubernetes, Redis, MySQL |
+| [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README.md) | Epic Online Services를 Unreal Engine의 표준 `OnlineSubsystem` Interface로 wrapping한 Native Code Plugin | Unreal Engine, C++, EOS SDK |
+| [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
 
 ---
 
 ## 관점 — 왜 이 다섯 프로젝트인가
 
-다섯 프로젝트는 모두 **"Client 간 통신 경로를 어떻게 확보할 것인가"**라는 동일한 문제를 서로 다른 계층에서 다룹니다.
+다섯 프로젝트는 모두 **Client 간 통신 경로를 어떻게 확보할 것인가**라는 동일한 문제를 서로 다른 계층에서 다룹니다.
 
 ```
                     ┌─────────────────────────────────────────────────────────┐
@@ -88,15 +88,15 @@ Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음입니다. 
 Unreal Engine Dedicated Server와 Client 양쪽에 탑재되어 동작하는 Native Code Plugin(Online Subsystem, OSS)입니다. 위 Backend와 직접 짝을 이루며, WebSocket(STOMP 유사 Framing)과 RabbitMQ/STOMP Lobby Messaging을 통해 UE의 `IOnlineSubsystem` 추상화 계층에 연결되며, Identity, Session/Matchmaking, User Cloud Storage, Lobby Queue 서비스를 자체 Protocol 기반으로 제공합니다.
 
 **핵심 설계**
-- **`FIcarusWSFrame` 자체 Wire Protocol**: STOMP에서 착안한 `COMMAND\nheader:value\n\nBODY` 프레임 포맷을 수동 Byte Buffer Parsing으로 직접 구현했습니다. Thread-safe한 단조 증가 `FrameIndex`로 비동기 요청/응답을 Correlate시키고, 모든 요청에 JWT Bearer 토큰을 자동 주입합니다.
-- **비동기 WebSocket RPC Layer**(`UIcarusConnectionComponentBase`): Command→Response Pairing으로 미응답 요청의 자동 Timeout을 처리하고, 전송 실패 시 재시도 후 실제 서버 응답과 동일한 Handler 경로로 실패 응답을 Synthesize — 호출부가 네트워크 장애와 RPC 에러를 구분할 필요가 없도록 설계했습니다. 지수 Backoff 기반 자동 재연결도 포함됩니다.
+- **`FIcarusWSFrame` 자체 Wire Protocol**: STOMP에서 착안한 `COMMAND\nheader:value\n\nBODY` 프레임 포맷을 수동 Byte Buffer Parsing으로 직접 구현했습니다. Thread-safe하게 순차적으로 증가하는 `FrameIndex`로 비동기 요청/응답을 Correlate시키고, 모든 요청에 JWT Bearer 토큰을 설정합니다.
+- **비동기 WebSocket RPC Layer**(`UIcarusConnectionComponentBase`): Command→Response Pairing으로 미응답 요청의 자동 Timeout을 처리하고, 전송 실패 시 재시도 후 실제 서버 응답과 동일한 Handler 경로로 실패 응답을 합성하여 — 호출부가 네트워크 장애와 RPC 에러를 구분할 필요가 없도록 설계했습니다. Exponential Backoff 기반 자동 재연결도 포함됩니다.
 - **전용 Heartbeat Thread**(`FIcarusConnectionPingManager`): 게임 Thread와 분리된 `FRunnable` Worker Thread가 주기적 Ping과 Prospect Heartbeat를 전담합니다.
-- **STOMP 기반 병렬 Lobby Client**(`UIcarusLobbyConnectionComponentBase`): 메인 Gateway Connection과 완전히 분리된 두 번째 STOMP-over-RabbitMQ 연결로 매치메이킹 대기열을 구독하며, 최근 10개 Sample 기반 Rolling Average로 대기열 소진 속도의 Noise를 완화해 ETA를 산출합니다.
+- **STOMP 기반 병렬 Lobby Client**(`UIcarusLobbyConnectionComponentBase`): 메인 Gateway Connection과 완전히 분리된 두 번째 STOMP-over-RabbitMQ 연결로 매치메이킹 대기열을 구독하며, 최근 10개 Sample 기반 Rolling Average로 대기열 소진 속도의 노이즈를 완화해 ETA를 산출합니다.
 - **모드 전환 시 Interface Hot-swap**: 온라인/오프라인 Connection Component 사이를 서브시스템 재초기화 없이 전환하며, 종속된 모든 Interface의 Callback을 다시 bind합니다.
 
 Backend가 서버 측 RabbitMQ Microservice 군이라면, OnlineSubsystemIcarus는 그 Backend와 통신하는 Wire Protocol을 Client 측에서 동일하게 재구현한 대응 짝입니다.
 
-→ 자세한 내용은 [UnrealPlugins/OnlineSubsystemIcarus/README_OnlineSubsystemIcarus.md](./UnrealPlugins/OnlineSubsystemIcarus/README_OnlineSubsystemIcarus.md) 참고.
+→ 자세한 내용은 [UnrealPlugins/OnlineSubsystemIcarus/README.md](./UnrealPlugins/OnlineSubsystemIcarus/README.md) 참고.
 
 ---
 
@@ -157,7 +157,7 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
     │   ├── README.md
     │   └── Source/ ...
     ├── OnlineSubsystemIcarus/
-    │   ├── README_OnlineSubsystemIcarus.md
+    │   ├── README.md
     │   └── Source/ ...
     └── SimpleUPNP/
         ├── README.md

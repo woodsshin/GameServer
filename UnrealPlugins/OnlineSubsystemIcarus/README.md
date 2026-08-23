@@ -47,15 +47,15 @@ FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
 STOMP에서 착안한 자체 프레임 format(`COMMAND\nheader:value\n\nBODY`)을 수동 byte buffer parsing(`ReadValue`, `SkipNewlines`, 구분자 인식 escaping)으로 직접 구현했습니다.
 
 - STOMP spec에 준하는 헤더 escape encoding(`\`, `:`, `\n`, `\r`)을 지원하며, 레거시 호환을 위해 `CONNECT` command는 예외 처리.
-- Thread-safe(`FCriticalSection`으로 보호)하게 단조 증가하는 `FrameIndex`를 사용해 비동기 요청과 응답을 correlate시킴.
+- Thread-safe(`FCriticalSection`으로 보호)하게 순차적으로 증가하는 `FrameIndex`를 사용해 비동기 요청과 응답을 correlate시킴.
 - Heartbeat 프레임(`IcarusHeartbeatCommand`)은 단일 `\n`으로 encoding.
 - 모든 요청 프레임에 JWT Bearer 토큰(`WS_HEADER_JWT_TOKEN`)을 자동 주입.
 - 로컬/싱글플레이어 fallback 경로를 위한 오프라인 모드 프레임 생성 지원.
 
 ### `UIcarusConnectionComponentBase` — Transport & RPC Layer
-`IWebSocket` lifecycle을 소유하며 그 위에 요청/응답 계약을 구현합니다.
+`IWebSocket` lifecycle을 소유하며 그 위에 요청/응답 프로토콜을 구현합니다.
 
-- **Command→Response pairing**(`FrameCommandPairs`)을 통해 응답 없는 요청에 대한 자동 timeout 처리를 구현: 미응답 요청은 만료 timestamp와 함께 `ReqFrameBuffers`에 저장되고 `FTicker`로 0.2초마다 polling됨.
+- **Command→Response pairing**(`FrameCommandPairs`)을 통해 응답 없는 요청에 대한 자동 timeout 처리를 구현. 미응답 요청은 만료 timestamp와 함께 `ReqFrameBuffers`에 저장되고 `FTicker`로 0.2초마다 polling됨.
 - **Send-with-retry**: `WriteFrameImpl`은 전송 실패 시 1초 간격으로 최대 60초까지 재시도한 뒤, 실제 서버 응답과 동일한 handler 경로로 "Backend connection lost" 실패 응답을 synthesize함 — 호출부에서 네트워크 장애와 실제 RPC 에러를 구분할 필요가 없도록 설계.
 - **지수 backoff 재연결**(`Reconnect()`) — `MaxReconnectTime`으로 상한이 걸려 있으며 전용 `FTicker` delegate로 구동.
 - **JWT 토큰 무효화 처리** — `ResTokenExpired` / `ResTokenNotSupplied` / `ResTokenInvalid`는 모두 `InvalidConnectionToken()`으로 수렴되어 캐시된 토큰을 폐기하고 clean 재연결을 강제함.
@@ -70,7 +70,7 @@ STOMP에서 착안한 자체 프레임 format(`COMMAND\nheader:value\n\nBODY`)�
 Matchmaking 대기열 telemetry를 위한, 메인 connection과 독립적인 두 번째 STOMP-over-RabbitMQ connection입니다.
 
 - 플레이어별 relay queue(`/queue/{playerId}`)와 broadcast topic(`/topic/notice`)을 구독하며, 두 구독이 모두 완료된 상태(`bSubscribedRelayTo && bSubscribedTopic`)를 확인한 뒤 `OnLobbyConnect`를 trigger.
-- `UIcarusLobbyConnectionComponent::CalculateTimeLeft`는 **rolling average 기반 처리율 estimator**(최근 10개 sample)를 구현하여 큐 소진 속도의 noise를 완화하고, 현재 큐 깊이와 경과 시간으로부터 ETA를 산출.
+- `UIcarusLobbyConnectionComponent::CalculateTimeLeft`는 **rolling average 기반 처리율 estimator**(최근 10개 sample)를 구현하여 큐 소진 속도의 노이즈를 완화하고, 현재 큐 깊이와 경과 시간으로부터 ETA를 산출.
 - 메인 gateway connection에서 캐시된 JWT(`FIcarusWSFrame::Token`)를 재사용하여 별도 재로그인 없이 인증을 처리, 추가 로그인 round-trip을 회피.
 
 ### `IcarusMessageListeners` — Event Fan-out
