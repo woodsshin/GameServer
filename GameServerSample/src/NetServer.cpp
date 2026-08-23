@@ -75,6 +75,16 @@ void IoWorker::RequestWrite(int fd) {
     (void)n;
 }
 
+void IoWorker::RequestForceClose(int fd) {
+    {
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        pendingForceCloseFds_.push_back(fd);
+    }
+    uint64_t one = 1;
+    ssize_t n = write(wakeupEventFd_, &one, sizeof(one));
+    (void)n;
+}
+
 void IoWorker::Run() {
     constexpr int MAX_EVENTS = 256;
     std::vector<epoll_event> events(MAX_EVENTS);
@@ -101,13 +111,20 @@ void IoWorker::Run() {
 
                 std::vector<int> newFds;
                 std::vector<int> writeFds;
+                std::vector<int> forceCloseFds;
                 {
                     std::lock_guard<std::mutex> lock(pendingMutex_);
                     newFds.swap(pendingNewFds_);
                     writeFds.swap(pendingWriteFds_);
+                    forceCloseFds.swap(pendingForceCloseFds_);
                 }
 
-                // 신규 소켓을 이 worker의 epoll에 등록
+                // 신규 소켓을 이 worker의 epoll에 EPOLLET(edge-triggered)로 등록.
+                // ET 모드에서는 "상태가 변할 때" 딱 한 번만 통지되므로, 이후
+                // HandleReadable/HandleWritable에서 반드시 EAGAIN이 나올 때까지
+                // read/write를 반복하는 논블로킹 루프로 처리해야 한다(이미 그렇게 구현됨).
+                // LT 대비 동일 fd가 epoll_wait에서 반복 반환되는 상황이 줄어
+                // epoll_wait 및 관련 시스템 콜 호출 횟수가 감소한다.
                 for (int newFd : newFds) {
                     uint64_t sessionId = nextSessionId_.fetch_add(1);
                     auto session = std::make_shared<Session>(newFd, sessionId);
@@ -115,7 +132,7 @@ void IoWorker::Run() {
                     localSessions[newFd] = session;
 
                     epoll_event sev{};
-                    sev.events = EPOLLIN | EPOLLRDHUP;
+                    sev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
                     sev.data.fd = newFd;
                     if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, newFd, &sev) < 0) {
                         fprintf(stderr, "[IoWorker %d] epoll_ctl(ADD) 실패 fd=%d: %s\n",
@@ -126,15 +143,26 @@ void IoWorker::Run() {
                     }
                 }
 
-                // 송신 대기 소켓에 EPOLLOUT 추가 등록 (edge-trigger 아닌 level-trigger 사용,
-                // 포트폴리오 목적상 단순성 우선. 실무에선 EPOLLET + 논블로킹 루프도 흔함)
+                // 송신 대기 소켓에 EPOLLOUT 추가 등록 (ET 모드 유지)
                 for (int wfd : writeFds) {
                     auto it = localSessions.find(wfd);
                     if (it == localSessions.end()) continue;
                     epoll_event sev{};
-                    sev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+                    sev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
                     sev.data.fd = wfd;
                     epoll_ctl(epollFd_, EPOLL_CTL_MOD, wfd, &sev);
+                    // ET 모드에서는 등록 시점에 이미 소켓 버퍼에 여유가 있어도
+                    // 별도 EPOLLOUT 이벤트가 발생하지 않을 수 있으므로, 등록 직후
+                    // 한 번 직접 flush를 시도해 첫 전송 지연을 없앤다.
+                    HandleWritable(it->second);
+                }
+
+                // 서버 주도 강제 종료 요청 처리 (하트비트 타임아웃 등)
+                for (int cfd : forceCloseFds) {
+                    auto it = localSessions.find(cfd);
+                    if (it == localSessions.end()) continue;
+                    CloseSession(it->second);
+                    localSessions.erase(it);
                 }
                 continue;
             }
@@ -244,7 +272,7 @@ void IoWorker::HandleWritable(std::shared_ptr<Session>& session) {
     int fd = session->GetFd();
 
     while (true) {
-        std::vector<char>* data = nullptr;
+        PacketBuffer data;
         size_t* offset = nullptr;
         if (!session->TryPeekSendFront(&data, &offset)) {
             break; // 더 보낼 게 없음
@@ -258,7 +286,7 @@ void IoWorker::HandleWritable(std::shared_ptr<Session>& session) {
                 session->PopSendFront();
             }
             if (static_cast<size_t>(n) < remaining) {
-                break; // 소켓 버퍼가 꽉 참, 다음 EPOLLOUT을 기다림
+                break; // 소켓 버퍼가 꽉 참, 다음 EPOLLOUT을 기다림 (ET이므로 EAGAIN까지 왔으니 안전하게 대기)
             }
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
@@ -268,10 +296,10 @@ void IoWorker::HandleWritable(std::shared_ptr<Session>& session) {
         }
     }
 
-    // 더 보낼 게 없으면 EPOLLOUT 감시를 해제해 불필요한 wake-up을 줄임
+    // 더 보낼 게 없으면 EPOLLOUT 감시를 해제해 불필요한 wake-up을 줄임 (ET 모드 유지)
     if (!session->HasPendingSend()) {
         epoll_event sev{};
-        sev.events = EPOLLIN | EPOLLRDHUP;
+        sev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
         sev.data.fd = fd;
         epoll_ctl(epollFd_, EPOLL_CTL_MOD, fd, &sev);
     }
@@ -417,7 +445,7 @@ void NetServer::AcceptLoop() {
     close(acceptEpollFd);
 }
 
-void NetServer::SendPacket(std::shared_ptr<Session> session, std::vector<char> packetData) {
+void NetServer::SendPacket(std::shared_ptr<Session> session, PacketBuffer packetData) {
     if (!session || session->GetState() == SessionState::CLOSING) return;
 
     bool becameNonEmpty = session->EnqueueSend(std::move(packetData));
@@ -437,13 +465,32 @@ void NetServer::SendPacket(std::shared_ptr<Session> session, std::vector<char> p
     }
 }
 
-void NetServer::BroadcastPacket(SessionManager& sessionManager, std::vector<char> packetData, uint64_t excludeSessionId) {
-    // 인증된 세션 스냅샷을 뜬 뒤, 각 세션에 동일 버퍼를 복사 전송.
-    // 실무에서는 레퍼런스 카운트 버퍼(shared_ptr<vector<char>>) 공유로 복사 비용을
-    // 줄이는 최적화가 흔하지만, 여기서는 명확성을 위해 단순 복사로 작성.
+void NetServer::BroadcastPacket(SessionManager& sessionManager, PacketBuffer packetData, uint64_t excludeSessionId) {
+    // 인증된 세션 스냅샷을 뜬 뒤, 모든 세션이 동일한 shared_ptr<const vector<char>>를 공유한다.
+    // 세션이 N명이어도 여기서 vector<char> 바이트 복사는 일어나지 않고, shared_ptr의
+    // 참조 카운트만 증가한다 — 실제 바이트 복사는 각 세션이 소켓에 write할 때
+    // 커널로 넘어가는 한 번뿐이며, 이는 어떤 전송 방식으로도 피할 수 없는 복사다.
     auto sessions = sessionManager.SnapshotAuthenticated();
     for (auto& s : sessions) {
         if (s->GetSessionId() == excludeSessionId) continue;
-        SendPacket(s, packetData); // 벡터 복사(오버로드가 값 전달이라 매 호출마다 복사됨)
+        SendPacket(s, packetData); // shared_ptr 복사(참조 카운트 증가)만 발생, 버퍼 자체는 공유
+    }
+}
+
+void NetServer::ForceDisconnect(std::shared_ptr<Session> session) {
+    if (!session) return;
+    // CLOSING으로 먼저 표시해 이후 SendPacket 등 신규 송신 요청이 조용히 무시되도록 함.
+    session->MarkForForceClose();
+
+    int fd = session->GetFd();
+    int workerIdx = -1;
+    {
+        std::lock_guard<std::mutex> lock(fdWorkerMapMutex_);
+        auto it = fdToWorkerIndex_.find(fd);
+        if (it != fdToWorkerIndex_.end()) workerIdx = it->second;
+    }
+    if (workerIdx >= 0) {
+        // 실제 close()는 이 fd를 소유한 IoWorker 스레드에서 강제종료 큐를 통해 수행된다.
+        workers_[workerIdx]->RequestForceClose(fd);
     }
 }

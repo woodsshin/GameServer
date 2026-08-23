@@ -2,8 +2,7 @@
 
 epoll 기반 비동기 I/O, DB 커넥션 풀, 스레드 분리 아키텍처로 구현한 소규모 게임 서버입니다.
 계정 생성, 로그인, 채팅 브로드캐스트, 대규모 동시 접속 처리를 지원하는 서버 아키텍처를
-직접 설계 및 구현하여 네트워크 프로그래밍, 비동기 처리, 데이터베이스 연동 역량을
-증명하는 것을 목표로 합니다.
+설계 및 구현하는 것을 목표로 합니다.
 
 ## 핵심 설계 포인트
 
@@ -14,32 +13,37 @@ epoll 기반 비동기 I/O, DB 커넥션 풀, 스레드 분리 아키텍처로 �
 ```
 - Accept 전용 스레드가 `listen` 소켓만 전담하여 감시합니다. worker 스레드가 트래픽 처리로 부하가 높은 상태에서도 신규 연결 수락(accept)이 지연되지 않습니다.
 - 각 IoWorker는 **독립된 epoll 인스턴스**를 보유합니다. 단일 epoll 인스턴스에 전체 파일 디스크립터를 모아 처리하는 구조와 비교해 락 경합이 발생하지 않으며, CPU 코어 수에 비례한 수평 확장(`std::thread::hardware_concurrency()` 기준 worker 수 결정)이 가능합니다.
-- 신규 소켓 등록, 쓰기 요청 등 스레드 경계를 넘나드는 통지는 `eventfd`와 `epoll_wait`를 조합해 처리하여, worker 스레드가 불필요한 폴링 없이 이벤트 기반으로만 활성화됩니다.
+- 신규 소켓 등록, 쓰기 요청, 강제 종료 요청 등 스레드 경계를 넘나드는 통지는 `eventfd`와 `epoll_wait`를 조합해 처리하여, worker 스레드가 불필요한 폴링 없이 이벤트 기반으로만 활성화됩니다.
+- 소켓은 **Edge-triggered(EPOLLET)** 모드로 등록되며, `HandleReadable`/`HandleWritable`이 이벤트가 발생할 때마다 `EAGAIN`이 반환될 때까지 read/write를 반복하는 논블로킹 루프로 처리합니다. Level-triggered 방식은 처리되지 않은 데이터가 남아있는 한 `epoll_wait`가 동일한 fd를 계속 반환하지만, Edge-triggered는 상태가 변화하는 시점에 한 번만 통지하므로 동일 fd에 대한 `epoll_wait` 반환 및 관련 시스템 콜 호출 횟수를 줄일 수 있습니다. 신규 쓰기 요청을 Edge-triggered로 등록한 직후에는 소켓 버퍼에 여유가 있어도 별도의 `EPOLLOUT` 이벤트가 발생하지 않을 수 있어, 등록과 동시에 한 번 직접 flush를 시도하여 첫 전송 지연을 없앴습니다.
 
-### 2. DB 비동기 처리 (Head-of-Line Blocking 회피)
+### 2. DB 비동기 처리 (Head-of-Line Blocking 회피 + 재연결)
 IoWorker 스레드가 로그인/회원가입 처리 중 블로킹 방식의 MySQL 쿼리를 직접 호출할 경우, 해당 스레드에 연결된 **다른 모든 소켓**의 이벤트 처리가 쿼리 응답 대기 시간만큼 지연됩니다(Head-of-Line Blocking). 이를 방지하기 위해 다음과 같은 파이프라인을 구성했습니다.
 
 ```
 IoWorker 스레드: 패킷 파싱 → DBTask(람다) 생성 → DBWorkerPool 큐에 Enqueue → 즉시 다음 이벤트 처리
 DB worker 스레드:   큐에서 Task Pop → 커넥션 풀에서 커넥션 대여 → 쿼리 실행 → NetServer::SendPacket으로 응답
+                    (연결 유실 감지 시 재연결 후 Task 재시도)
 ```
 - `DBConnectionPool`: `MYSQL*` 커넥션 N개를 사전에 생성해두는 풀과, RAII 가드(`ScopedConnection`)를 통한 반납 누락 방지 로직으로 구성됩니다.
 - `DBWorkerPool`: `ThreadSafeQueue<DBTask>` 기반의 작업 큐와 worker 스레드 풀로 구성되며, Prepared Statement를 사용해 SQL Injection을 차단합니다.
 - `NetServer::SendPacket`은 호출 스레드에 관계없이 안전하게 동작합니다. 세션의 송신 큐는 mutex로 보호되며, 대상 세션이 속한 worker에는 `eventfd`를 통해 쓰기 이벤트가 통지됩니다.
+- **DB 재연결**: `MYSQL_OPT_RECONNECT`(클라이언트 라이브러리의 자동 재연결 옵션)는 최신 버전에서 deprecated되었고, 재연결 시 세션 상태가 조용히 초기화되는 위험이 있어 사용하지 않았습니다. 대신 `DBTask::execute`가 `ScopedConnection&`을 전달받아, 쿼리 실행 후 `mysql_errno()` 값이 `CR_SERVER_GONE_ERROR`/`CR_SERVER_LOST` 등 연결 유실 코드에 해당하는지(`IsConnectionLostError`) 직접 판별합니다. 연결 유실로 판단되면 `MarkBroken()`으로 표시하고, `ScopedConnection` 소멸 시점에 `DBConnectionPool::Reconnect()`가 새 커넥션을 맺어 풀에 반납합니다. `DBWorkerPool::WorkerLoop`는 이 표시를 확인하여 동일한 Task를 최대 1회 재시도합니다(문법 오류 등 재연결로 해결되지 않는 실패는 재시도하지 않고 로그로 남깁니다).
 
 ### 3. 패킷 프로토콜 및 스트림 처리
 - `[4B TotalSize][2B PacketType][Body]` 구조의 길이 기반 바이너리 프로토콜을 사용합니다.
 - TCP는 스트림 기반 프로토콜이므로 한 번의 `recv` 호출에 여러 패킷이 결합되어 수신되거나, 하나의 패킷이 여러 번에 걸쳐 분할 수신될 수 있습니다. 이를 처리하기 위해 `Session::RecvBuffer()`에 데이터를 누적하고, 완성된 패킷만 추출하여 디스패치하며 나머지는 다음 `recv` 호출까지 보존합니다.
 - 부분 전송(`send` 호출 시 요청한 크기만큼 전송되지 않는 경우, short write)도 `EPOLLOUT` 이벤트를 기반으로 이어서 처리됩니다.
 
-### 4. 동시성 안전 세션 관리
+### 4. 동시성 안전 세션 관리 및 버퍼 공유
 - `SessionManager`는 `std::shared_mutex`를 사용합니다. 채팅 브로드캐스트와 같이 "전체 순회 + 읽기" 연산이 빈번한 경우 `shared_lock`으로 동시 진입을 허용해 처리량을 확보하고, 세션 추가/삭제와 같이 컨테이너 구조가 변경되는 연산에만 `unique_lock`을 적용합니다.
 - 브로드캐스트 시 락을 보유한 상태로 `send()`까지 수행하지 않도록, 세션 목록의 스냅샷만 획득한 뒤 즉시 락을 해제하고 순회하며 전송합니다(락 보유 시간 최소화).
+- **송신 버퍼는 `shared_ptr<const vector<char>>`(`PacketBuffer`)로 공유합니다.** 브로드캐스트로 동일한 패킷을 N명에게 전송할 때 세션마다 `vector<char>`를 복사하지 않고, `NetServer::BroadcastPacket`이 버퍼를 하나만 생성하여 각 세션의 송신 큐에는 참조 카운트만 증가시켜 전달합니다. 실제 바이트 복사는 각 세션이 소켓에 `send()`를 호출할 때 커널로 넘어가는 한 번뿐이며, 이는 어떤 전송 방식을 쓰더라도 피할 수 없는 복사입니다.
 
 ### 5. 보안 및 안정성
 - 비밀번호는 계정별 랜덤 salt와 SHA-256 스트레칭(10,000라운드)을 적용하여 저장하며, 평문 비교 로직은 존재하지 않습니다.
 - 모든 쿼리 파라미터는 Prepared Statement로 바인딩하여 SQL Injection을 방지합니다.
 - 하트비트 미수신 세션은 60초 타임아웃 기준으로 감지되어 강제 종료 통지가 전송됩니다.
+- **서버 주도 강제 종료**: 통지만 전송하고 클라이언트의 자발적인 연결 해제를 기다리는 대신, `IoWorker`에 강제 종료 큐(`pendingForceCloseFds_`)를 별도로 두었습니다. `HeartbeatMonitorLoop`가 타임아웃을 감지하면 `NetServer::ForceDisconnect`를 호출하고, 이 요청은 해당 세션을 소유한 `IoWorker`의 큐에 적재된 뒤 `eventfd`로 해당 워커를 깨워 실제 `close()`까지 서버가 직접 수행합니다. 통지를 무시하는 악성/오작동 클라이언트도 좀비 세션으로 남지 않습니다.
 - 비정상적인 패킷 크기 또는 과도한 recv 버퍼 누적이 감지되면 연결을 강제 종료합니다(악성/오작동 클라이언트 방어).
 - `SIGPIPE` 시그널을 무시 처리하여 클라이언트의 비정상 종료가 서버 프로세스 종료로 이어지지 않도록 합니다.
 
@@ -108,9 +112,9 @@ DB_HOST=127.0.0.1 DB_USER=gameapp DB_PASSWORD=yourpassword DB_NAME=game_server \
 
 ## 검증 결과 (로컬 통합 테스트)
 - 클라이언트 3개를 동시 접속시켜 회원가입, 로그인, 채팅 브로드캐스트가 정상 동작함을 확인했습니다.
-- 한 클라이언트가 전송한 채팅 메시지가 동시 접속 중인 다른 클라이언트에게 실시간으로 브로드캐스트됨을 확인했습니다.
+- 한 클라이언트가 전송한 채팅 메시지가 동시 접속 중인 다른 클라이언트에게 실시간으로 브로드캐스트됨을 확인했습니다(EPOLLET 및 `shared_ptr<const vector<char>>` 공유 버퍼 방식으로 전환한 이후에도 동일하게 정상 동작함을 확인했습니다).
 - `chat_logs` 테이블에 한글 메시지가 UTF-8로 정확히 적재됨을 HEX 덤프로 확인했습니다.
-- 하트비트 타임아웃(60초) 로직이 정상적으로 세션을 감지하고 `S2C_FORCE_DISCONNECT` 패킷을 전송함을 확인했습니다.
+- 하트비트 타임아웃(60초) 로직이 정상적으로 세션을 감지해 `S2C_FORCE_DISCONNECT` 통지를 전송하고, `NetServer::ForceDisconnect`를 통해 서버가 해당 세션의 소켓을 직접 종료함을 확인했습니다(클라이언트 로그에서 통지 수신 직후 연결 종료까지 확인했습니다).
 - `-Wall -Wextra -pthread` 옵션 기준 경고 없이 빌드됨을 확인했습니다.
 
 ## 부하 테스트: 대용량 동시 접속 처리 검증
@@ -139,17 +143,6 @@ python3 tools/load_test.py --host 127.0.0.1 --port 9000 \
 LOAD_TEST_STAGES="100 300 600 1000" \
   ./tools/run_full_load_test.sh 9000 127.0.0.1 gameapp yourpassword game_server
 ```
-
-## 개선이 필요한 사항 (실무 대비 트레이드오프)
-포트폴리오 목적상 명확성을 우선하여 단순화한 부분이며, 실제 프로덕션 환경 적용 시의 개선 방향을 함께 명시합니다.
-
-| 항목 | 현재 구현 | 실무 개선 방향 |
-|---|---|---|
-| epoll 트리거 방식 | Level-triggered | Edge-triggered(EPOLLET) 방식과 논블로킹 루프를 적용하여 시스템 콜 호출 횟수를 절감 |
-| 브로드캐스트 버퍼 | 세션마다 vector를 복사하여 전송 | `shared_ptr<vector<char>>`로 버퍼를 공유하여 복사 비용을 제거 |
-| DB 재연결 | 미구현 (연결 끊김 발생 시 쿼리 실패) | 쿼리 실패를 감지한 뒤 명시적으로 재연결을 수행하는 로직 추가 |
-| 하트비트 강제 종료 | 종료 통지만 전송하며, 실제 소켓 종료는 클라이언트의 자율적 연결 해제에 의존 | IoWorker에 강제 종료 큐를 별도로 두어 서버가 주도적으로 소켓을 종료하도록 개선 |
-| 비밀번호 해싱 | SHA-256 + salt + 스트레칭 10,000라운드 (실측: 1회 약 15.7ms, 1,000 동시 접속 시 회원가입 처리량이 27.5 req/sec로 고정되는 CPU 병목 확인됨 — [부하 테스트 리포트](./LOAD_TEST_REPORT.md) 참고) | bcrypt 또는 Argon2 등 검증된 전용 해싱 라이브러리로 대체, 또는 스트레칭 라운드를 보안 요구 수준에 맞게 하향 조정 |
 
 ## 적용된 기술
 - **네트워크**: epoll 기반 비동기 논블로킹 I/O, 다중 epoll 인스턴스를 통한 worker 수평 확장, eventfd를 이용한 스레드 간 통지, 부분 송수신(short read/write) 처리, TCP_NODELAY 적용 근거에 대한 이해.
