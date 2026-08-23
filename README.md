@@ -2,7 +2,7 @@
 
 Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 모음입니다. 각 프로젝트는 독립된 Repository처럼 구성되어 있으며, 하단 링크에서 세부 구현과 검증 결과를 확인할 수 있습니다.
 
-**GameServerSample**은 Unreal Engine과 무관하게 Claude Code를 활용해 작성한 순수 C++ Game Server 예제이고, **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 공동으로 개발한 microservice는 포함하지 않았습니다.
+**GameServerSample**은 Unreal Engine과 무관하게 Claude Code를 활용해 작성한 순수 C++ Game Server 예제이고, **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다.
 
 | Project | 요약 | Stack |
 |---|---|---|
