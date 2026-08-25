@@ -3,11 +3,12 @@
 Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음입니다. 각 서비스는 독립적으로 배포되며 RabbitMQ(AMQP/STOMP)를 공용 message bus로 사용해 서로 통신합니다. Unreal Engine 클라이언트 측 `OnlineSubsystemIcarus`(별도 repository)가 이 서비스들과 WebSocket/STOMP wire protocol로 직접 연동됩니다.
 
 ```
-adminproxy/    관리자용 HTTP → RabbitMQ RPC gateway (internal network 전용)
-botclient/     부하 테스트를 위한 게임 클라이언트 시뮬레이터
-lobbystats/    매치메이킹 대기열 통계 산출 및 실시간 broadcast
+adminproxy/     관리자용 HTTP → RabbitMQ RPC gateway (internal network 전용)
+botclient/      부하 테스트를 위한 게임 클라이언트 시뮬레이터
+lobbystats/     매치메이킹 대기열 통계 산출 및 실시간 broadcast
+sessionmanager/ 인게임 로드아웃·진행 중인 게임(Prospect) 상태를 Redis에 저장하는 세션 저장소
 
-match-making/  (Icarus와 무관) Seedworld 프로젝트의 AWS GameLift 매치메이킹 서비스
+match-making/   (Icarus와 무관) Seedworld 프로젝트의 AWS GameLift 매치메이킹 서비스
 ```
 
 ---
@@ -29,8 +30,13 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 
 **핵심 사용처**: 클라이언트 로비 화면의 "대기 인원 N명, 예상 대기 시간 M초" 표시를 위한 서버 측 데이터 소스.
 
+### [`sessionmanager/`](./sessionmanager/README.md) — Session & Progress Store
+게임 클라이언트가 보낸 인게임 로드아웃, 진행 중인 게임(Prospect) 상태, 추적 통계(tracked stats)를 Redis Cluster에 저장·조회하는 microservice입니다. RabbitMQ 메시지로 요청을 받아 처리 후 응답을 되돌려 보내며, `frameidx` correlation 헤더로 비동기 pub/sub 모델 위에서 요청-응답을 페어링합니다. `HSetNX` 기반 분산 락과 타임아웃 기반 failover로 세션 재접속·호스트 마이그레이션 시 단일 호스트를 보장하는 것이 핵심 설계입니다.
+
+**핵심 사용처**: 캐릭터 로드아웃 조회·갱신, Prospect(진행 중인 게임) 상태 관리, 세션 재접속 시 호스트 재할당.
+
 ### [`match-making/`](./match-making/README.md) — GameLift Matchmaking (Seedworld, 별도 프로젝트)
-> ⚠️ 위 세 서비스(`adminproxy`, `botclient`, `lobbystats`)와 달리 **Icarus** 백엔드 서비스가 **Seedworld**의 백엔드 서비스이며, Go/RabbitMQ 스택이 아닌 **C#(ASP.NET Core) 기반 gRPC 서비스**로 AWS GameLift와 직접 연동합니다. 편의상 이 저장소에 함께 보관되어 있을 뿐, 위 Cross-Service Architecture·Shared Design Patterns 섹션과는 무관합니다.
+> ⚠️ 위 세 서비스(`adminproxy`, `botclient`, `lobbystats`)와 달리 **Icarus** 백엔드 소속이 아닙니다. 별도 프로젝트인 **Seedworld**의 백엔드 서비스이며, Go/RabbitMQ 스택이 아닌 **C#(ASP.NET Core) 기반 gRPC 서비스**로 AWS GameLift와 직접 연동합니다. 편의상 이 저장소에 함께 보관되어 있을 뿐, 위 Cross-Service Architecture·Shared Design Patterns 섹션과는 무관합니다.
 
 게임 클라이언트(EOS 인증)와 데디케이티드 서버(S2S 인증) 양쪽의 요청을 받아 AWS GameLift 상에서 빈 슬롯이 있는 게임 세션을 검색하거나, 없으면 FlexMatch로 신규 매치메이킹을 시작하고 세션을 배치하는 서비스입니다.
 
@@ -60,7 +66,7 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 
 여러 서비스에 걸쳐 반복적으로 나타나는 설계 원칙입니다.
 
-- **RabbitMQ connection resilience**: `adminproxy`, `lobbystats`, `botclient` 모두 connection 종료를 감지해 자동 재연결하는 supervisor 패턴을 독립적으로 구현하고 있으며, 재연결 시 exchange/queue 상태를 함께 재구성하여 broker 재시작 이후에도 일관된 상태로 복구됩니다.
+- **RabbitMQ connection resilience**: `adminproxy`, `lobbystats`, `botclient`, `sessionmanager` 모두 connection 종료를 감지해 자동 재연결하는 supervisor 패턴을 독립적으로 구현하고 있으며, 재연결 시 exchange/queue 상태를 함께 재구성하여 broker 재시작 이후에도 일관된 상태로 복구됩니다.
 - **커스텀 wire protocol의 다중 언어 재구현**: Unreal 클라이언트의 `FIcarusWSFrame`(C++)과 동일한 프레임 포맷이 `lobbystats`, `botclient`에 각각 독립적으로 재구현되어 있으며, 이 protocol-level 계약이 서로 다른 언어·repository 간 상호운용성의 유일한 접점입니다.
 - **Config 기반 운영 조정**: 폴링 주기(`lobbystats`), 부하 패턴(`botclient`), 클라이언트 최소 버전(`adminproxy`)처럼 운영 중 자주 바뀌는 값들은 모두 코드 변경 없이 config 파일이나 API 호출로 조정 가능하도록 분리되어 있습니다.
 
@@ -69,8 +75,9 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 ## Tech Stack
 
 - **Language**: Go
-- **Messaging**: RabbitMQ — AMQP(`streadway/amqp`, `adminproxy`), STOMP(`go-stomp/stomp`, `lobbystats`/`botclient`), Management HTTP API(`lobbystats`)
+- **Messaging**: RabbitMQ — AMQP(`streadway/amqp`, `adminproxy`/`sessionmanager`), STOMP(`go-stomp/stomp`, `lobbystats`/`botclient`), Management HTTP API(`lobbystats`)
 - **Transport**: WebSocket(`gorilla/websocket`), HTTP(`gorilla/mux`)
+- **Storage**: Redis Cluster(`go-redis/v8`, `sessionmanager`)
 - **Configuration**: `spf13/viper`, command-line flag override
 - **Serialization**: `encoding/json`, 커스텀 byte-level frame codec, zlib 압축
 

@@ -72,11 +72,12 @@ Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음입니다. 
 - **adminproxy**: HTTP Request를 RabbitMQ 기반 RPC로 변환해 Player Service, Session Manager, Gateway로 라우팅하는 관리자용 Gateway. `frameIdx` 기반 `context.Context` Correlation으로 RabbitMQ의 Pub/Sub 모델과 HTTP의 동기 모델을 연결합니다.
 - **botclient**: 로비 진입 → JWT 인증 → Gateway 연결 → RPC 시퀀스 실행까지 실제 Client와 동일한 흐름을 다수의 가상 Bot으로 재현하는 부하 테스트 도구. `RecvAck` 기반 Self-throttling Scheduler로 도구 자신이 병목이 되지 않도록 설계했습니다.
 - **lobbystats**: RabbitMQ Management API를 Polling해 매치메이킹 대기열 통계를 산출하고, STOMP로 Client에 실시간 Broadcast하는 소규모 서비스입니다.
+- **sessionmanager**: Client가 보낸 인게임 로드아웃, 진행 중인 게임(Prospect) 상태, 추적 통계를 Redis Cluster에 저장·조회하는 서비스. `HSetNX` 기반 분산 락과 Timeout 기반 Failover로 세션 재접속·Host Migration 시 단일 Host를 보장합니다.
 
 **핵심 설계**
 - **RabbitMQ 중심 결합 구조**: 모든 서비스는 서로 직접 호출하지 않고 Exchange/Queue 바인딩으로만 결합되어, 개별 배포·재시작·장애가 다른 서비스에 직접적인 컴파일/런타임 의존성을 만들지 않습니다.
 - **Kubernetes(Azure) 배포**: `Gateway`, `SessionManager`, `PlayerService`, `Scheduler`, `AdminProxy`가 RabbitMQ를 중심으로 연결되며, Redis(SessionManager)와 MySQL(PlayerService/Scheduler)을 Data Store로 사용합니다.
-- **Connection Resilience**: `adminproxy`, `lobbystats`, `botclient` 모두 Connection 종료를 감지해 자동 재연결하는 Supervisor 패턴을 독립적으로 구현하고 있으며, 재연결 시 Exchange/Queue 상태를 함께 재구성합니다.
+- **Connection Resilience**: `adminproxy`, `lobbystats`, `botclient`, `sessionmanager` 모두 Connection 종료를 감지해 자동 재연결하는 Supervisor 패턴을 독립적으로 구현하고 있으며, 재연결 시 Exchange/Queue 상태를 함께 재구성합니다.
 - **커스텀 Wire Protocol의 다중 언어 재구현**: Unreal Client의 `FIcarusWSFrame`(C++)과 동일한 Frame Format(`EventName\nheader:value\n\nBody`)이 `lobbystats`, `botclient`에 각각 독립적으로 재구현되어 있으며, 이 Protocol-level 계약이 서로 다른 언어·Repository 간 상호운용성의 유일한 접점입니다.
 
 → 자세한 내용은 [Backend/README_backend.md](./Backend/README_backend.md) 참고.
@@ -150,7 +151,9 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 │   │   └── README.md
 │   ├── botclient/
 │   │   └── README.md
-│   └── lobbystats/
+│   ├── lobbystats/
+│   │   └── README.md
+│   └── sessionmanager/
 │       └── README.md
 └── UnrealPlugins/
     ├── OnlineSubsystemEOS/
