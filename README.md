@@ -80,7 +80,7 @@ Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음입니다. 
 - **Connection Resilience**: `adminproxy`, `lobbystats`, `botclient`, `sessionmanager` 모두 Connection 종료를 감지해 자동 재연결하는 Supervisor 패턴을 독립적으로 구현하고 있으며, 재연결 시 Exchange/Queue 상태를 함께 재구성합니다.
 - **커스텀 Wire Protocol의 다중 언어 재구현**: Unreal Client의 `FIcarusWSFrame`(C++)과 동일한 Frame Format(`EventName\nheader:value\n\nBody`)이 `lobbystats`, `botclient`에 각각 독립적으로 재구현되어 있으며, 이 Protocol-level 계약이 서로 다른 언어·Repository 간 상호운용성의 유일한 접점입니다.
 
-→ 자세한 내용은 [Backend/README_backend.md](./Backend/README_backend.md) 참고.
+→ 자세한 내용은 [Backend/README.md](./Backend/README.md) 참고.
 
 ---
 
