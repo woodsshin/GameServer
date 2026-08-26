@@ -1,17 +1,17 @@
 # OnlineSubsystemIcarus
 
-**Unreal Engine Online Subsystem (OSS)** 기반으로 제작된 커스텀 게임 백엔드 연동 plugin입니다. **WebSocket(STOMP 유사 framing)** 과 **RabbitMQ/STOMP 로비 messaging**을 통해 UE의 `IOnlineSubsystem` 추상화 계층에 연결되며, Identity, Session/Matchmaking, User Cloud Storage, Lobby Queue 서비스를 자체 protocol 기반으로 제공합니다.
+A custom game backend integration plugin built on the **Unreal Engine Online Subsystem (OSS)**. It connects to UE's `IOnlineSubsystem` abstraction layer through **WebSocket (STOMP-like framing)** and **RabbitMQ/STOMP lobby messaging**, providing Identity, Session/Matchmaking, User Cloud Storage, and Lobby Queue services on top of its own custom protocol.
 
 ---
 
 ## Overview
 
-`OnlineSubsystemIcarus`는 표준 Unreal OSS plugin 패턴(`FOnlineSubsystemIcarus : public FOnlineSubsystemIcarusGen`)을 따르지만, 실질적인 engineering 포인트는 다음 두 영역에 집중되어 있습니다.
+`OnlineSubsystemIcarus` follows the standard Unreal OSS plugin pattern (`FOnlineSubsystemIcarus : public FOnlineSubsystemIcarusGen`), but the real engineering focus is concentrated in two areas:
 
-1. **비동기 WebSocket RPC framework** (`IcarusWSFrame` / `IcarusConnectionComponentBase`) — Raw WebSocket transport 위에 요청/응답 semantics, timeout tracking, reconnect/backoff 로직을 layering.
-2. **STOMP 기반 병렬 Lobby/Queue client** (`IcarusLobbyConnectionComponentBase`) — RabbitMQ를 통한 matchmaking 대기열 상태 업데이트를 담당하며, 메인 gateway connection과 완전히 분리되어 동작.
+1. **Asynchronous WebSocket RPC framework** (`IcarusWSFrame` / `IcarusConnectionComponentBase`) — layers request/response semantics, timeout tracking, and reconnect/backoff logic on top of a raw WebSocket transport.
+2. **STOMP-based parallel Lobby/Queue client** (`IcarusLobbyConnectionComponentBase`) — handles matchmaking queue status updates over RabbitMQ, operating completely independently from the main gateway connection.
 
-서브시스템은 표준 UE interface(`IOnlineIdentity`, `IOnlineSession`, `IOnlineUserCloud`, `IOnlineUser`)를 노출하지만, 내부적으로는 모든 백엔드 통신이 이 두 connection component를 통해 routing됩니다.
+The subsystem exposes the standard UE interfaces (`IOnlineIdentity`, `IOnlineSession`, `IOnlineUserCloud`, `IOnlineUser`), but internally all backend communication is routed through these two connection components.
 
 ---
 
@@ -20,23 +20,23 @@
 ```
 FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
 │
-├── FOnlineIdentityInterfaceIcarus     — 로그인/로그아웃, 계정/세션 토큰 lifecycle
-├── FOnlineSessionIcarus               — matchmaking, 호스트 migration, connection string relay
-├── FOnlineUserCloudIcarus             — zlib 압축 + SHA1 해시 기반 세이브 데이터 업/다운로드
-├── FOnlineUserInterfaceIcarus         — 캐시된 온라인 유저 조회
-├── FOnlineProfileIcarus               — 캐릭터 슬롯 유효성 검증 layer
-├── FOnlineLobbyIcarus                 — 로비 RPC dispatch, JWT 토큰 갱신
+├── FOnlineIdentityInterfaceIcarus     — Login/logout, account/session token lifecycle
+├── FOnlineSessionIcarus               — Matchmaking, host migration, connection string relay
+├── FOnlineUserCloudIcarus             — Save data upload/download with zlib compression + SHA1 hashing
+├── FOnlineUserInterfaceIcarus         — Cached online user lookup
+├── FOnlineProfileIcarus               — Character slot validation layer
+├── FOnlineLobbyIcarus                 — Lobby RPC dispatch, JWT token refresh
 │
 ├── UIcarusConnectionComponent (UIcarusConnectionComponentBase)
-│   ├── WebSocket transport (ws/wss) — WebSocketsModule 기반
-│   ├── FIcarusWSFrame — 커스텀 wire protocol (프레임 encoding/decoding)
-│   ├── FIcarusConnectionPingManager — heartbeat/prospect keep-alive 전담 worker thread (FRunnable)
-│   └── 프레임 기반 요청/응답 dispatch table (FrameHandler / FrameCommandPairs)
+│   ├── WebSocket transport (ws/wss) — built on WebSocketsModule
+│   ├── FIcarusWSFrame — custom wire protocol (frame encoding/decoding)
+│   ├── FIcarusConnectionPingManager — dedicated heartbeat/prospect keep-alive worker thread (FRunnable)
+│   └── Frame-based request/response dispatch table (FrameHandler / FrameCommandPairs)
 │
 └── UIcarusLobbyConnectionComponent (UIcarusLobbyConnectionComponentBase)
-    ├── STOMP client (RabbitMQ) — StompModule 기반
-    ├── FLobbyWSFrame — IStompMessage를 공용 FIcarusWSFrame body 포맷으로 wrapping하는 adapter
-    └── 대기열 위치 ETA 추정 (CalculateTimeLeft)
+    ├── STOMP client (RabbitMQ) — built on StompModule
+    ├── FLobbyWSFrame — adapter that wraps IStompMessage into the common FIcarusWSFrame body format
+    └── Queue position ETA estimation (CalculateTimeLeft)
 ```
 
 ---
@@ -44,16 +44,16 @@ FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
 ## Core Components
 
 ### `FIcarusWSFrame` — Wire Protocol
-STOMP에서 착안한 자체 프레임 format(`COMMAND\nheader:value\n\nBODY`)을 수동 byte buffer parsing(`ReadValue`, `SkipNewlines`, 구분자 인식 escaping)으로 직접 구현했습니다.
+A custom frame format inspired by STOMP (`COMMAND\nheader:value\n\nBODY`), implemented directly with manual byte buffer parsing (`ReadValue`, `SkipNewlines`, delimiter-aware escaping).
 
-- STOMP spec에 준하는 헤더 escape encoding(`\`, `:`, `\n`, `\r`)을 지원하며, 레거시 호환을 위해 `CONNECT` command는 예외 처리.
-- Thread-safe(`FCriticalSection`으로 보호)하게 순차적으로 증가하는 `FrameIndex`를 사용해 비동기 요청과 응답을 correlate시킴.
-- Heartbeat 프레임(`IcarusHeartbeatCommand`)은 단일 `\n`으로 encoding.
-- 모든 요청 프레임에 JWT Bearer 토큰(`WS_HEADER_JWT_TOKEN`)을 자동 주입.
-- 로컬/싱글플레이어 fallback 경로를 위한 오프라인 모드 프레임 생성 지원.
+- Supports STOMP-spec-compliant header escape encoding (`\`, `:`, `\n`, `\r`), with an exception for the `CONNECT` command for legacy compatibility.
+- Uses a thread-safe (protected by `FCriticalSection`), monotonically increasing `FrameIndex` to correlate asynchronous requests and responses.
+- Heartbeat frames (`IcarusHeartbeatCommand`) are encoded as a single `\n`.
+- Automatically injects a JWT Bearer token (`WS_HEADER_JWT_TOKEN`) into every request frame.
+- Supports offline-mode frame generation for the local/single-player fallback path.
 
 ```cpp
-// IcarusWSFrame.cpp — 헤더 escape 규칙을 따르는 byte-level 파서
+// IcarusWSFrame.cpp — Byte-level parser that follows the header escape rules
 static uint8 ReadValue(const uint8* In, SIZE_T Length, SIZE_T& Index, FIcarusWSBuffer& Buffer,
                         const char* Delimiters = "\n", bool bAllowEscaping = true)
 {
@@ -80,7 +80,7 @@ static uint8 ReadValue(const uint8* In, SIZE_T Length, SIZE_T& Index, FIcarusWSB
         bEscapeNext = false;
     }
 
-    // STOMP는 \r\n도 줄바꿈으로 허용하므로 끝에 남은 \r은 잘라낸다
+    // STOMP also allows \r\n as a line break, so trim any trailing \r
     if (Retval == '\n' && Buffer.Num() > 0 && Buffer[Buffer.Num() - 1] == '\r')
     {
         Buffer.RemoveAt(Buffer.Num() - 1);
@@ -92,7 +92,7 @@ static uint8 ReadValue(const uint8* In, SIZE_T Length, SIZE_T& Index, FIcarusWSB
 ```
 
 ```cpp
-// IcarusWSFrame.cpp — 생성자에서 모든 온라인 프레임에 JWT를 자동 주입
+// IcarusWSFrame.cpp — Constructor automatically injects a JWT into every online frame
 FIcarusWSFrame::FIcarusWSFrame(const FIcarusWSCommand& InCommand, const FIcarusWSHeader& InHeader,
                                 const FIcarusWSBuffer& InBody, bool bInOfflineFrame)
     : FrameIdx(INDEX_NONE)
@@ -117,13 +117,13 @@ FIcarusWSFrame::FIcarusWSFrame(const FIcarusWSCommand& InCommand, const FIcarusW
 }
 ```
 
-`Encode`/`Decode`는 프레임을 wire format으로 직렬화하고 다시 파싱하는 한 쌍의 함수입니다. `Encode`는 `COMMAND\nframe-idx:N\nheader:value\n...\n\nBODY` 형식으로 기록하며, heartbeat 프레임은 특별히 헤더/바디 없이 `\n` 한 글자로만 처리하고, `CONNECT` 커맨드에 한해서는 레거시 호환을 위해 metacharacter escaping을 건너뜁니다. `Decode`는 그 반대로, 앞쪽 개행을 건너뛰어 heartbeat 여부를 판별한 뒤 command를 읽고, 빈 줄이 나올 때까지 헤더를 파싱하며, 나머지 바이트를 body로 취급합니다.
+`Encode`/`Decode` are the counterpart pair that serialize a frame to the wire format and parse it back. `Encode` writes `COMMAND\nframe-idx:N\nheader:value\n...\n\nBODY`, with a special case for heartbeat frames (a single `\n`, no headers/body), and — for the `CONNECT` command only — skips metacharacter escaping for backwards compatibility. `Decode` mirrors this: it skips leading newlines to detect a heartbeat, reads the command, then reads headers until it hits an empty line, and treats the remaining bytes as the body.
 
 ```cpp
-// IcarusWSFrame.cpp — 프레임을 wire format으로 직렬화 (heartbeat vs. COMMAND\nheaders\n\nBODY)
+// IcarusWSFrame.cpp — Serializes a frame to the wire format (heartbeat vs. COMMAND\nheaders\n\nBODY)
 void FIcarusWSFrame::Encode(FIcarusWSBuffer& Out) const
 {
-	// heartbeat는 단순히 개행 하나이며 어떤 데이터도 담을 수 없고 \n 바이트로 종료되지도 않는다
+	// A heartbeat is just a newline and can't contain any data nor is it terminated with a \n byte
 	if (Command == IcarusHeartbeatCommand)
 	{
 		Out.Add('\n');
@@ -137,10 +137,10 @@ void FIcarusWSFrame::Encode(FIcarusWSBuffer& Out) const
 			UE_LOG(IcarusOSSLog, Warning, TEXT("Ignoring body for heartbeat frame."));
 		}
 	}
-	// 그 외의 경우 COMMAND\nHeaders\n\nBody 형식으로 출력한다. \0은 일단 제거했음.
+	// Else output COMMAND\nHeaders\n\nBody. Removed \0 for now. 
 	else
 	{
-		// spec에 따르면 CONNECT 커맨드는 레거시 호환을 위해 metacharacter를 escape하지 않아야 한다.
+		// According to the spec, the CONNECT command should not escape metacharacters for backwards compatibility.
 		bool bShouldEscapeFrameHeader = Command != IcarusConnectCommand;
 
 		FString CommandString = Command.ToString();
@@ -149,7 +149,7 @@ void FIcarusWSFrame::Encode(FIcarusWSBuffer& Out) const
 		AppendArray(Out, (uint8*)CommandEncoded.Get(), CommandEncoded.Length(), bShouldEscapeFrameHeader);
 		Out.Add('\n');
 
-		// frame index 인코딩
+		// encode frame index
 		FTCHARToUTF8 HeaderFrameIdxEncoded(*WS_HEADER_FRAME_INDEX.ToString());
 		AppendArray(Out, (uint8*)HeaderFrameIdxEncoded.Get(), HeaderFrameIdxEncoded.Length(), bShouldEscapeFrameHeader);
 		Out.Add(':');
@@ -162,7 +162,7 @@ void FIcarusWSFrame::Encode(FIcarusWSBuffer& Out) const
 		AppendArray(Out, (uint8*)HeaderFrameIdxValueEncoded.Get(), HeaderFrameIdxValueEncoded.Length(), bShouldEscapeFrameHeader);
 		Out.Add('\n');
 
-		// header 인코딩
+		// encode header
 		for (const TPair<FName, FString>& Element : Header)
 		{
 			FString ElementKeyString = Element.Key.ToString();
@@ -183,10 +183,10 @@ void FIcarusWSFrame::Encode(FIcarusWSBuffer& Out) const
 ```
 
 ```cpp
-// IcarusWSFrame.cpp — raw byte buffer를 다시 프레임(command, header, frame index, body)으로 파싱
+// IcarusWSFrame.cpp — Parses a raw byte buffer back into a frame (command, headers, frame index, body)
 void FIcarusWSFrame::Decode(const uint8* In, SIZE_T Length)
 {
-	// 존재한다면 종료 0 바이트는 무시한다
+	// Ignore terminating 0 if present
 	if (Length > 0 && In[Length-1] == 0)
 	{
 		Length--;
@@ -194,17 +194,17 @@ void FIcarusWSFrame::Decode(const uint8* In, SIZE_T Length)
 
 	FIcarusWSBuffer Buffer;
 	SIZE_T Index = 0;
-	// 앞쪽에 있는 개행들을 모두 잘라낸다
+	// Trim off any initial newlines
 	SkipNewlines(In, Length, Index);
 
-	// 개행을 잘라낸 뒤 버퍼가 비어있으면 heartbeat 패킷이라는 뜻이다
+	// Empty buffer after trimming newlines means this is a heartbeat packet
 	if (Index >= Length)
 	{
 		Command = IcarusHeartbeatCommand;
 		return;
 	}
 
-	// command를 읽는다
+	// Read command
 	ReadValue(In, Length, Index, Buffer);
 	Command = UTF8_TO_TCHAR(Buffer.GetData());
 
@@ -214,7 +214,7 @@ void FIcarusWSFrame::Decode(const uint8* In, SIZE_T Length)
 		return;
 	}
 
-	// header를 디코딩한다
+	// decode header
 	while(Index < Length)
 	{
 		const uint8* Junk = In+Index;
@@ -230,7 +230,7 @@ void FIcarusWSFrame::Decode(const uint8* In, SIZE_T Length)
 		}
 		else if (HeaderName == FName())
 		{
-			// 빈 줄은 header의 끝을 의미한다
+			// Empty line marks the end of headers
 			break;
 		}
 		else
@@ -240,28 +240,28 @@ void FIcarusWSFrame::Decode(const uint8* In, SIZE_T Length)
 		}
 	}
 
-	// frame index를 디코딩한다
+	// decode frame index
 	if (Header.Contains(WS_HEADER_FRAME_INDEX))
 	{
 		FrameIdx = FCString::Atoi64(*Header[WS_HEADER_FRAME_INDEX]);
 	}
 
 	Body.Append(In + Index, Length - Index);
-	// 버퍼 끝에 문자열 종료자를 추가한다
+	// Add string terminator at the end of the buffer
 	Body.Add('\0');
 }
 ```
 
 ### `UIcarusConnectionComponentBase` — Transport & RPC Layer
-`IWebSocket` lifecycle을 소유하며 그 위에 요청/응답 프로토콜을 구현합니다.
+Owns the `IWebSocket` lifecycle and implements the request/response protocol on top of it.
 
-- **Command→Response pairing**(`FrameCommandPairs`)을 통해 응답 없는 요청에 대한 자동 timeout 처리를 구현. 미응답 요청은 만료 timestamp와 함께 `ReqFrameBuffers`에 저장되고 `FTicker`로 0.2초마다 polling됨.
-- **Send-with-retry**: `WriteFrameImpl`은 전송 실패 시 1초 간격으로 최대 60초까지 재시도한 뒤, 실제 서버 응답과 동일한 handler 경로로 "Backend connection lost" 실패 응답을 synthesize함 — 호출부에서 네트워크 장애와 실제 RPC 에러를 구분할 필요가 없도록 설계.
-- **지수 backoff 재연결**(`Reconnect()`) — `MaxReconnectTime`으로 상한이 걸려 있으며 전용 `FTicker` delegate로 구동.
-- **JWT 토큰 무효화 처리** — `ResTokenExpired` / `ResTokenNotSupplied` / `ResTokenInvalid`는 모두 `InvalidConnectionToken()`으로 수렴되어 캐시된 토큰을 폐기하고 clean 재연결을 강제함.
+- Implements automatic timeout handling for requests that receive no response, via **command→response pairing** (`FrameCommandPairs`). Unanswered requests are stored in `ReqFrameBuffers` with an expiration timestamp and polled every 0.2 seconds via `FTicker`.
+- **Send-with-retry**: `WriteFrameImpl` retries every 1 second for up to 60 seconds on send failure, then synthesizes a "Backend connection lost" failure response through the same handler path used for real server responses — so callers never need to distinguish between a network failure and an actual RPC error.
+- **Exponential backoff reconnect** (`Reconnect()`) — capped by `MaxReconnectTime` and driven by a dedicated `FTicker` delegate.
+- **JWT token invalidation handling** — `ResTokenExpired`, `ResTokenNotSupplied`, and `ResTokenInvalid` all converge on `InvalidConnectionToken()`, which discards the cached token and forces a clean reconnect.
 
 ```cpp
-// IcarusConnectionComponentBase.cpp — 0.2초마다 만료된 요청을 찾아 동일 handler 경로로 실패 응답 dispatch
+// IcarusConnectionComponentBase.cpp — Every 0.2s, finds expired requests and dispatches a failure response through the same handler path
 bool UIcarusConnectionComponentBase::CheckTimeoutRequests(float DeltaSeconds)
 {
 	int64 CurrentTime = (FDateTime::UtcNow().GetTicks() - FDateTime(1970, 1, 1).GetTicks()) / ETimespan::TicksPerSecond;
@@ -300,7 +300,7 @@ bool UIcarusConnectionComponentBase::CheckTimeoutRequests(float DeltaSeconds)
 ```
 
 ```cpp
-// IcarusConnectionComponentBase.cpp — 전송 실패 시 1초 간격 재시도, 60초 초과 시 실패 응답 synthesize
+// IcarusConnectionComponentBase.cpp — Retries every 1s on send failure, synthesizes a failure response after 60s
 void UIcarusConnectionComponentBase::WriteFrameImpl(const FIcarusWSFrame& Frame, const FIcarusWSBuffer& FrameData, float ElapsedRetryTime)
 {
 	auto TrySendFrame = [this](const FIcarusWSBuffer& FrameData)
@@ -354,7 +354,7 @@ void UIcarusConnectionComponentBase::WriteFrameImpl(const FIcarusWSFrame& Frame,
 ```
 
 ```cpp
-// IcarusConnectionComponentBase.cpp — 지수 backoff 재연결 (2^attempt초, MaxReconnectTime으로 상한)
+// IcarusConnectionComponentBase.cpp — Exponential backoff reconnect (2^attempt seconds, capped by MaxReconnectTime)
 void UIcarusConnectionComponentBase::Reconnect()
 {
 	ReconnectTimer = 1.0f;
@@ -390,7 +390,7 @@ void UIcarusConnectionComponentBase::Reconnect()
 ```
 
 ```cpp
-// IcarusConnectionComponentBase.cpp — 3가지 토큰 오류 응답이 모두 같은 무효화 경로로 수렴
+// IcarusConnectionComponentBase.cpp — All three token error responses converge on the same invalidation path
 void UIcarusConnectionComponentBase::InvalidConnectionToken()
 {
 	Close();
@@ -407,13 +407,13 @@ void UIcarusConnectionComponentBase::OnResTokenInvalid(const FIcarusWSFrameRef& 
 ```
 
 ### `FIcarusConnectionPingManager` — Heartbeat Thread
-게임 thread와 분리된 전용 `FRunnable` worker thread입니다.
+A dedicated `FRunnable` worker thread separate from the game thread.
 
-- 부모 connection이 살아있는 동안 일정 주기로 `ReqPing`을 전송.
-- 선택적으로 "prospect"(백엔드 상의 임시/예약 entity)를 `UpdateProspect()`로 heartbeat 처리하며, `FScopeLock`으로 보호되는 timer를 통해 thread 종료 없이 런타임 중 ON/OFF 전환 가능(`SetHeartbeatProspect` / `ClearHeartbeatProspect`).
+- Sends `ReqPing` at a fixed interval as long as the parent connection is alive.
+- Optionally heartbeats a "prospect" (a temporary/reserved entity on the backend) via `UpdateProspect()`, with the timer protected by `FScopeLock` so it can be toggled ON/OFF at runtime (`SetHeartbeatProspect` / `ClearHeartbeatProspect`) without terminating the thread.
 
 ```cpp
-// IcarusConnectionPingManager.cpp — worker thread에서 ping/prospect heartbeat를 함께 처리
+// IcarusConnectionPingManager.cpp — Handles both ping and prospect heartbeats on the worker thread
 uint32 FIcarusConnectionPingManager::Run()
 {
 	while (bRunning && IcarusConnectionComponent && !IcarusConnectionComponent->IsPendingKill() && IcarusConnectionComponent->IsConnected())
@@ -447,7 +447,7 @@ uint32 FIcarusConnectionPingManager::Run()
 ```
 
 ```cpp
-// IcarusConnectionPingManager.cpp — 런타임 중 prospect heartbeat ON/OFF 전환
+// IcarusConnectionPingManager.cpp — Toggles prospect heartbeat ON/OFF at runtime
 void FIcarusConnectionPingManager::SetHeartbeatProspect(const FString& NewProspectID)
 {
 	FScopeLock Lock(&CriticalSectionUpdateProspect);
@@ -466,14 +466,14 @@ void FIcarusConnectionPingManager::ClearHeartbeatProspect()
 ```
 
 ### `UIcarusLobbyConnectionComponentBase` — Queue/Lobby Messaging
-Matchmaking 대기열 telemetry를 위한, 메인 connection과 독립적인 두 번째 STOMP-over-RabbitMQ connection입니다.
+A second STOMP-over-RabbitMQ connection for matchmaking queue telemetry, independent from the main connection.
 
-- 플레이어별 relay queue(`/queue/{playerId}`)와 broadcast topic(`/topic/notice`)을 구독하며, 두 구독이 모두 완료된 상태(`bSubscribedRelayTo && bSubscribedTopic`)를 확인한 뒤 `OnLobbyConnect`를 trigger.
-- `UIcarusLobbyConnectionComponent::CalculateTimeLeft`(파생 클래스, 본 업로드에는 미포함)는 **rolling average 기반 처리율 estimator**(최근 10개 sample)를 구현하여 큐 소진 속도의 노이즈를 완화하고, 현재 큐 깊이와 경과 시간으로부터 ETA를 산출.
-- 메인 gateway connection에서 캐시된 JWT(`FIcarusWSFrame::Token`)를 재사용하여 별도 재로그인 없이 인증을 처리, 추가 로그인 round-trip을 회피.
+- Subscribes to a per-player relay queue (`/queue/{playerId}`) and a broadcast topic (`/topic/notice`), and triggers `OnLobbyConnect` once both subscriptions have completed (`bSubscribedRelayTo && bSubscribedTopic`).
+- `UIcarusLobbyConnectionComponent::CalculateTimeLeft` (a derived class, not included in this upload) implements a **rolling-average-based throughput estimator** (last 10 samples) to smooth out noise in queue drain rate, and computes an ETA from the current queue depth and elapsed time.
+- Reuses the cached JWT (`FIcarusWSFrame::Token`) from the main gateway connection to authenticate without a separate re-login, avoiding an extra login round-trip.
 
 ```cpp
-// IcarusLobbyConnectionComponentBase.cpp — 두 구독이 모두 끝나야 로비 연결 완료로 간주
+// IcarusLobbyConnectionComponentBase.cpp — Lobby connection is only considered complete once both subscriptions finish
 void UIcarusLobbyConnectionComponentBase::Subscribe()
 {
 	if (StompClient.IsValid())
@@ -507,7 +507,7 @@ bool UIcarusLobbyConnectionComponentBase::InitializedSubscriptions()
 ```
 
 ```cpp
-// IcarusLobbyConnectionComponentBase.cpp — 메인 게이트웨이 JWT를 재사용해 별도 로그인 없이 인증
+// IcarusLobbyConnectionComponentBase.cpp — Reuses the main gateway JWT to authenticate without a separate login
 void UIcarusLobbyConnectionComponentBase::OnLoginComplete(int32 LocalUserNum, bool bWasSuccessful,
                                                            const FUniqueNetId& UserId, const FString& Error)
 {
@@ -527,18 +527,18 @@ void UIcarusLobbyConnectionComponentBase::OnLoginComplete(int32 LocalUserNum, bo
 ```
 
 ### `IcarusMessageListeners` — Event Fan-out
-저수준 connection component delegate(`OnConnect`, `OnMatchUpdate`, `OnChatMessage` 등)를 게임 layer용 multicast delegate로 다시 broadcast하는 UObject 기반의 얇은 pub/sub bridge로, 게임플레이 코드를 OSS interface 내부 구현으로부터 분리시킵니다.
+A thin UObject-based pub/sub bridge that re-broadcasts low-level connection component delegates (`OnConnect`, `OnMatchUpdate`, `OnChatMessage`, etc.) as multicast delegates for the game layer, decoupling gameplay code from the OSS interface's internal implementation.
 
 ### `FOnlineIdentityInterfaceIcarus` — Login Lifecycle
-표준 `IOnlineIdentity`를 구현하며, 플랫폼 native 로그인(Steam/EOS)과 Icarus 백엔드 로그인을 단일화 합니다.
+Implements the standard `IOnlineIdentity` interface, unifying platform-native login (Steam/EOS) with Icarus backend login.
 
-- `Login()`은 중복 로그인을 방지하기 위해 진행 중인 로그인이나 기존 세션이 있으면 먼저 `Logout()`으로 정리한 뒤, `UIcarusConnectionComponent::Connect()`로 WebSocket handshake를 트리거.
-- 로그인 성공 여부는 실제로는 WebSocket 응답(`ResUserTicket`)을 기다려야 하므로, `Login()` 자체는 handshake 개시 성공 여부만 반환하고 최종 결과는 `OnResUserTicket` 콜백에서 `TriggerOnLoginCompleteDelegates`로 통지.
-- **오프라인 모드 fallback**: 백엔드로부터 매칭되는 로컬 유저를 찾지 못했는데 오프라인 모드인 경우, dummy 계정을 생성해 `UserAccounts`/`UserIds`에 등록 — 싱글플레이어 상황에서도 identity 관련 API가 정상 동작하도록 보장.
-- `IsConnected()`는 오프라인 모드에서는 항상 `true`를 반환하고, 온라인 모드에서는 WebSocket 연결 여부와 로그인 상태(`LoginStatus` user attribute)를 모두 확인.
+- `Login()` first cleans up any in-progress login or existing session via `Logout()` to prevent duplicate logins, then triggers the WebSocket handshake through `UIcarusConnectionComponent::Connect()`.
+- Because login success actually depends on waiting for a WebSocket response (`ResUserTicket`), `Login()` itself only returns whether the handshake was successfully initiated, and the final result is reported later via `TriggerOnLoginCompleteDelegates` in the `OnResUserTicket` callback.
+- **Offline mode fallback**: if no matching local user is found from the backend response and the game is in offline mode, a dummy account is created and registered in `UserAccounts`/`UserIds` — ensuring identity-related APIs still work correctly in single-player situations.
+- `IsConnected()` always returns `true` in offline mode; in online mode it checks both the WebSocket connection state and the login status (the `LoginStatus` user attribute).
 
 ```cpp
-// OnlineIdentityInterfaceIcarus.cpp — 로그인 개시: 기존 세션 정리 후 WebSocket handshake 시작
+// OnlineIdentityInterfaceIcarus.cpp — Login initiation: clean up any existing session, then start the WebSocket handshake
 bool FOnlineIdentityInterfaceIcarus::Login(int32 LocalUserNum, const FOnlineAccountCredentials& AccountCredentials)
 {
 	if (bHasLoginOutstanding)
@@ -556,7 +556,7 @@ bool FOnlineIdentityInterfaceIcarus::Login(int32 LocalUserNum, const FOnlineAcco
 	LocalUserNumPendingLogin = LocalUserNum;
 	bHasLoginOutstanding = true;
 
-	// ... 캐시 계정 등록 ...
+	// ... register cached account ...
 
 	if (UIcarusConnectionComponent* ICC = IcarusSubsystem->GetIcarusConnectionComponent())
 	{
@@ -574,7 +574,7 @@ bool FOnlineIdentityInterfaceIcarus::Login(int32 LocalUserNum, const FOnlineAcco
 ```
 
 ```cpp
-// OnlineIdentityInterfaceIcarus.cpp — 백엔드 응답에 매칭되는 로컬 유저가 없을 때 오프라인 dummy 계정 생성
+// OnlineIdentityInterfaceIcarus.cpp — Creates an offline dummy account when no local user matches the backend response
 else
 {
 	UE_LOG(IcarusOSSLog, Error, TEXT("OnResUserTicket : No player found"));
@@ -593,10 +593,10 @@ else
 ```
 
 ### `FOnlineProfileIcarus` — Character Slot Validation
-자동 생성된 `FOnlineProfileIcarusGen` 기반 클래스 위에, 캐릭터 슬롯 관련 요청(잠금 해제, 진행도 갱신, 삭제, 리셋)에 공통적으로 `ChrSlot != INDEX_NONE` 유효성 검증을 추가하는 얇은 override layer입니다.
+A thin override layer on top of the auto-generated `FOnlineProfileIcarusGen` base class, adding a common `ChrSlot != INDEX_NONE` validity check to character-slot-related requests (unlock, progress update, delete, reset).
 
 ```cpp
-// OnlineProfileIcarus.cpp — 캐릭터 슬롯 유효성 검증 후 base 구현에 위임
+// OnlineProfileIcarus.cpp — Validates the character slot, then delegates to the base implementation
 bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacterFlags& Request)
 {
 	if (Request.ChrSlot == INDEX_NONE)
@@ -608,16 +608,16 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
 }
 ```
 
-동일한 패턴이 `ValidateUpdateCharacterProgress`, `ValidateDeleteCharacter`, `ValidateResetCharacter`에도 반복됩니다 — 슬롯 검증만 상위 layer에서 가로채고 나머지 RPC 로직은 코드젠 기반 base 구현에 위임하는 구조.
+The same pattern is repeated in `ValidateUpdateCharacterProgress`, `ValidateDeleteCharacter`, and `ValidateResetCharacter` — only the slot validation is intercepted at this layer, while the rest of the RPC logic is delegated to the codegen-based base implementation.
 
 
 
-## 주요 설계 세부 사항
+## Key Design Details
 
-- **모드 전환 시 interface hot-swap**: `SwitchOnlineMode()`는 `UIcarusConnectionComponent`(온라인)와 `UIcarusOfflineConnectionComponentGen`(오프라인) 사이를 전환하며, `Identity`, `Session`, `UserCloud`, `MessageListeners` 등 종속된 모든 interface의 callback을 다시 bind — 서브시스템 재초기화 없이 온라인/오프라인 fallback을 매끄럽게 지원. (진입점만 아래 예시로 포함; 실제 hot-swap 구현부인 `FOnlineSubsystemIcarus.cpp`는 이번 업로드에는 없습니다.)
+- **Interface hot-swap on mode switch**: `SwitchOnlineMode()` switches between `UIcarusConnectionComponent` (online) and `UIcarusOfflineConnectionComponentGen` (offline), re-binding the callbacks of all dependent interfaces — `Identity`, `Session`, `UserCloud`, `MessageListeners`, etc. — enabling smooth online/offline fallback without reinitializing the subsystem. (Only the entry point is shown below as an example; the actual hot-swap implementation in `FOnlineSubsystemIcarus.cpp` is not included in this upload.)
 
   ```cpp
-  // OnlineSubsystemIcarusOfflineFunctionLibrary.cpp — Blueprint에서 호출하는 진입점
+  // OnlineSubsystemIcarusOfflineFunctionLibrary.cpp — Entry point called from Blueprint
   bool UOnlineSubsystemIcarusOfflineFunctionLibrary::SwitchOnlineMode(bool bOnlineMode)
   {
   	FOnlineSubsystemIcarus* IcarusSubsystem = (FOnlineSubsystemIcarus*)IOnlineSubsystem::Get(ICARUS_SUBSYSTEM);
@@ -632,12 +632,12 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
   }
   ```
 
-- **통합된 실패 처리 경로**: timeout 만료(`CheckTimeoutRequests`)와 복구 불가능한 전송 실패(`WriteFrameImpl`) 모두 `FIcarusWSFrame::SetOfflineModeCommand`를 통해 응답 프레임을 synthesize한 뒤, 실제 서버 응답이 사용하는 것과 *동일한* `FrameHandler` table로 dispatch — RPC 호출부는 원인과 무관하게 단일한 실패 처리 코드 경로만 다루면 됨 (구현은 위 `UIcarusConnectionComponentBase` 섹션 참고).
+- **Unified failure handling path**: both expired timeouts (`CheckTimeoutRequests`) and unrecoverable send failures (`WriteFrameImpl`) synthesize a response frame via `FIcarusWSFrame::SetOfflineModeCommand`, then dispatch it through the *same* `FrameHandler` table used for real server responses — so RPC callers only ever need to handle a single failure code path, regardless of the underlying cause (see the `UIcarusConnectionComponentBase` section above for the implementation).
 
-- **WebSocket 업그레이드 헤더 기반 인증**: `Connect()`는 표준 WebSocket handshake의 upgrade header에 플랫폼 타입, 유저 ID, AppId, 플랫폼 native auth token, 그리고 클라이언트/데이터 버전을 실어 보내 별도의 로그인 RPC 없이 handshake 단계에서 인증을 수행.
+- **Authentication via WebSocket upgrade headers**: `Connect()` sends the platform type, user ID, AppId, platform-native auth token, and client/data version in the upgrade headers of the standard WebSocket handshake, performing authentication at the handshake stage without a separate login RPC.
 
   ```cpp
-  // IcarusConnectionComponentBase.cpp — WebSocket handshake header에 인증/버전 정보 주입
+  // IcarusConnectionComponentBase.cpp — Injects auth/version info into the WebSocket handshake headers
   TMap<FString, FString> UpgradeHeaders;
   UpgradeHeaders.Add(TEXT("Type"), DefaultPlatformService);
   UpgradeHeaders.Add(TEXT("UserId"), AccountCredentials.Id);
@@ -652,10 +652,10 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
   WebSocket->Connect();
   ```
 
-- **파일 업로드 pipeline** (`FOnlineUserCloudIcarus::WriteUserFile`): 무결성 검증을 위한 SHA-1 hashing, zlib 압축(`FCompression::CompressMemory`), 그리고 헤더에 압축/비압축 길이·hash·progress key 등의 metadata를 함께 실어 단일 요청으로 처리.
+- **File upload pipeline** (`FOnlineUserCloudIcarus::WriteUserFile`): handles SHA-1 hashing for integrity verification, zlib compression (`FCompression::CompressMemory`), and metadata such as compressed/uncompressed length, hash, and progress key — all sent together in the header as a single request.
 
   ```cpp
-  // OnlineUserCloudIcarus.cpp — 압축 + 해시 + metadata header를 한 번의 WriteFrame 요청으로 전송
+  // OnlineUserCloudIcarus.cpp — Sends compression + hash + metadata header in a single WriteFrame request
   bool FOnlineUserCloudIcarus::WriteUserFile(const FUniqueNetId& UserId, const FString& FileName,
                                               TArray<uint8>& FileContents, bool bCompressBeforeUpload)
   {
@@ -704,7 +704,7 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
   }
   ```
 
-  압축률 로깅도 함께 남깁니다:
+  Compression ratio is also logged:
 
   ```cpp
   UE_LOG_ONLINE_CLOUD(Warning, TEXT("WriteUserFile %s %d/%d - %.2f%%"),
@@ -712,7 +712,7 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
       (double)(FileContents.Num() - CompressedSize) / (double)FileContents.Num() * 100);
   ```
 
-- **Thread 안전성 경계**: ping manager는 자체 thread에서 동작하며 공유 상태(`ProspectID`, `UpdateProspectPingTimer`)를 `FScopeLock`으로 보호. WebSocket I/O 및 UObject delegate broadcast는 `FTicker`를 통해 게임 thread에 유지.
+- **Thread safety boundary**: the ping manager runs on its own thread and protects shared state (`ProspectID`, `UpdateProspectPingTimer`) with `FScopeLock`. WebSocket I/O and UObject delegate broadcasts are kept on the game thread via `FTicker`.
 
 ---
 
@@ -722,4 +722,4 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
 - **Transport**: WebSockets (`WebSocketsModule`), STOMP over RabbitMQ (`StompModule`)
 - **Serialization**: `FJsonObjectConverter` (UStruct ⇄ JSON)
 - **Concurrency**: `FRunnable`/`FRunnableThread`, `FTicker`, `FCriticalSection`/`FScopeLock`
-- **Auth**: JWT Bearer 토큰, 플랫폼 native 인증(Steam/EOS)을 upgrade header로 전달
+- **Auth**: JWT Bearer tokens, platform-native authentication (Steam/EOS) passed via upgrade headers
