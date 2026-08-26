@@ -36,7 +36,7 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 **핵심 사용처**: 캐릭터 로드아웃 조회·갱신, Prospect(진행 중인 게임) 상태 관리, 세션 재접속 시 호스트 재할당.
 
 ### [`match-making/`](./match-making/README.md) — GameLift Matchmaking (Seedworld, 별도 프로젝트)
-> ⚠️ 위 세 서비스(`adminproxy`, `botclient`, `lobbystats`)와 달리 **Icarus** 백엔드 소속이 아닙니다. 별도 프로젝트인 **Seedworld**의 백엔드 서비스이며, Go/RabbitMQ 스택이 아닌 **C#(ASP.NET Core) 기반 gRPC 서비스**로 AWS GameLift와 직접 연동합니다. 편의상 이 저장소에 함께 보관되어 있을 뿐, 위 Cross-Service Architecture·Shared Design Patterns 섹션과는 무관합니다.
+> ⚠️ 위 4개의 서비스(`adminproxy`, `adminproxy`, `botclient`, `lobbystats`)와 달리 **Icarus** 백엔드 소속이 아닙니다. 별도 프로젝트인 **Seedworld**의 백엔드 서비스이며, Go/RabbitMQ 스택이 아닌 **C#(ASP.NET Core) 기반 gRPC 서비스**로 AWS GameLift와 직접 연동합니다. 편의상 이 저장소에 함께 보관되어 있을 뿐, 위 Cross-Service Architecture·Shared Design Patterns 섹션과는 무관합니다.
 
 게임 클라이언트(EOS 인증)와 데디케이티드 서버(S2S 인증) 양쪽의 요청을 받아 AWS GameLift 상에서 빈 슬롯이 있는 게임 세션을 검색하거나, 없으면 FlexMatch로 신규 매치메이킹을 시작하고 세션을 배치하는 서비스입니다.
 

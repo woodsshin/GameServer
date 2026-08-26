@@ -36,7 +36,7 @@ A microservice that stores and retrieves in-game loadouts, ongoing match (Prospe
 **Primary use**: Looking up and updating character loadouts, managing Prospect (ongoing match) state, and reassigning hosts on session reconnection.
 
 ### [`match-making/`](./match-making/README_EN.md) — GameLift Matchmaking (Seedworld, a separate project)
-> ⚠️ Unlike the three services above (`adminproxy`, `botclient`, `lobbystats`), this does **not** belong to the Icarus backend. It's a backend service for **Seedworld**, a separate project, and rather than the Go/RabbitMQ stack, it's a **C# (ASP.NET Core)-based gRPC service** that integrates directly with AWS GameLift. It's kept in this repository purely for convenience, and is unrelated to the Cross-Service Architecture / Shared Design Patterns sections above.
+> ⚠️ Unlike the 4 services above (`sessionmanager`, `adminproxy`, `botclient`, `lobbystats`), this does **not** belong to the Icarus backend. It's a backend service for **Seedworld**, a separate project, and rather than the Go/RabbitMQ stack, it's a **C# (ASP.NET Core)-based gRPC service** that integrates directly with AWS GameLift. It's kept in this repository purely for convenience, and is unrelated to the Cross-Service Architecture / Shared Design Patterns sections above.
 
 A service that receives requests from both the game client (EOS authentication) and the dedicated server (S2S authentication), and either searches for a game session with an open slot on AWS GameLift, or, if none exists, starts new matchmaking via FlexMatch and places a session.
 
