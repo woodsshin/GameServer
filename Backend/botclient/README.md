@@ -42,38 +42,276 @@ botrequest.json (시나리오 정의)
 ### `main.go` / `botclient.go` — Bot Lifecycle & Orchestration
 - **`Run()`**: 설정 로딩과 유효성 검증(botcount, scenario repeat) 후, `LobbyEnable` 설정에 따라 `createLobbyConnectors()` 또는 `createSockets()`로 봇 집단을 기동. 이후 `TickInSec` 기반 `time.Ticker`로 전체 봇의 다음 요청 전송을 중앙에서 스케줄링.
 - **`lobbyConnector`**: 봇별로 독립적인 STOMP connection을 열어 `ReqLobbyMessage`를 전송하고 개인 릴레이 큐(userID 기준)를 구독. 로비로부터 성공 응답과 JWT를 수신하면 그 토큰으로 곧바로 gateway WebSocket 연결(`createSocket`)로 전환 — 실제 클라이언트의 로비 대기 → 게이트웨이 진입 흐름을 그대로 모사.
+
+  ```go
+  for {
+      msg := <-newRelayToQueue.C
+      if msg == nil || msg.Body == nil {
+          break
+      }
+
+      var message parser.WsMessage
+      message.Decode(msg.Body)
+
+      var lobbyMsg model.ResLobbyMessage
+      err := json.Unmarshal(message.Event, &lobbyMsg)
+      logger.LogNonFatalError(err)
+
+      if lobbyMsg.Success {
+          authToken, ok := message.Headers["jwttoken"]
+          if ok {
+              createSocket(userID, authToken)
+              break
+          }
+      }
+      requestLobbyMessage(userID, newLobbyConn)
+  }
+  ```
+
 - **`generateRequest`**: 시나리오의 `EventName`을 실제 RPC request struct(`model.ReqXxx`)로 매핑하는 대규모 switch 문. 캐릭터 생성, 인벤토리 조회, 워크숍 아이템 구매, 드롭십 구성, Prospect(탐사) 생성/갱신/정산 등 게임의 핵심 도메인 이벤트를 폭넓게 커버.
 - **`generateProspect`**: 매 반복마다 payload 크기를 누적 증가시키는 더미 바이너리 데이터를 생성하고 SHA-1 해시 계산, zlib 압축, base64 인코딩까지 거쳐 `ReqUpdateProspect`를 구성 — 실제 세이브 데이터 동기화 트래픽의 크기·빈도 특성을 재현하기 위한 합성 부하(synthetic load) 생성 로직.
+
+  ```go
+  // keep increasing prospect data
+  if additionalDataSize <= 0 {
+      additionalDataSize = 128
+  }
+
+  delta := make([]byte, additionalDataSize)
+  rand.Read(delta)
+  botProfile.ProspectData = append(botProfile.ProspectData, delta...)
+  zippedProspect, err := compress.ZipSkipMarshal(botProfile.ProspectData)
+
+  hash := sha1.New()
+  hash.Write(botProfile.ProspectData)
+
+  reqUpdateProspect.ProspectBlob.Hash = hex.EncodeToString(hash.Sum(nil))
+  reqUpdateProspect.ProspectBlob.BinaryBlob = base64.StdEncoding.EncodeToString(zippedProspect)
+  reqUpdateProspect.ProspectBlob.TotalLength = int32(len(zippedProspect))
+  reqUpdateProspect.ProspectBlob.UncompressedLength = int32(len(botProfile.ProspectData))
+  ```
+
 - **`proceedNextMessage`**: 매 tick마다 모든 봇을 순회하며 상태를 전진시키는 핵심 스케줄러.
   - `RecvAck`(이전 요청 응답 수신 여부)와 `ReqIdx`(현재 진행 인덱스)를 확인하여, 응답을 받은 봇만 다음 요청을 전송 — **요청 간 오버랩을 방지하고 게이트웨이(Gateway) 응답 속도에 맞춰 자연스럽게 스로틀링(Throttling)되는 구조**.
   - 각 이벤트에 설정된 `Delay`를 경과 시간과 비교해 지연 후 발송을 구현.
   - 시나리오를 모두 소진하면 `Repeat` 카운트에 따라 처음부터 재시작하거나, 완전히 종료 시 `NeedReset` 플래그로 로비 재접속(새 세션 시뮬레이션)을 트리거.
   - 활성 요청이 없는 유휴 상태에서는 20초 간격 `ReqPing`으로 연결 유지.
+
+  ```go
+  if botProfile.RecvAck && botProfile.ReqIdx != -1 && botProfile.Scenario.Requests != nil {
+      if botProfile.ReqIdx >= len(botProfile.Scenario.Requests) {
+          if botProfile.Scenario.Repeat > 1 {
+              botProfile.Scenario.Repeat--
+              botProfile.ReqIdx = 0
+          } else {
+              // start from lobby
+              botProfile.NeedReset = true
+              botrequest.SocketIDs.BotClients[ws] = botProfile
+              continue
+          }
+      }
+
+      botEvent := botProfile.Scenario.Requests[botProfile.ReqIdx]
+      if botEvent.Delay <= botEvent.Elapsed {
+          botEvent.Elapsed = 0
+          err := sendMessage(ws, botProfile, botEvent) // gate: only fires after RecvAck
+          ...
+      } else {
+          botEvent.Elapsed += deltaSeconds // still waiting out the delay
+      }
+  } else {
+      // idle: keep-alive ping every 20s
+      if time.Duration(20*float64(time.Second)) < elapsed {
+          handler.WriteToWs(ws, &queueMsg) // ReqPing
+      }
+  }
+  ```
+
 - **`ReadMessage`**: WebSocket 수신 루프. 연결 종료 감지 시 자동으로 `reSetConnection`을 호출해 세션을 처음부터(로비 또는 직접 연결) 재기동 — 장시간 실행되는 부하 테스트가 개별 연결 끊김에도 중단 없이 지속되도록 보장.
+
+  ```go
+  for {
+      var msg parser.WsMessage
+      _, b, err := ws.ReadMessage()
+      if _, ok := err.(*websocket.CloseError); ok {
+          go reSetConnection(ws, userID, authKey) // retry
+          return
+      }
+      if err != nil {
+          go reSetConnection(ws, userID, authKey) // retry
+          return
+      }
+      if b != nil {
+          msg.Decode(b)
+          handler.HandleMessage(ws, &queueMsg)
+      }
+  }
+  ```
 
 ### `handler.go` / `handler_custom.go` — Response Dispatch
 - Event name 기반 handler registry 패턴으로, `ResUserTicket`, `ResPong`, `ResTokenIssued`/`Expired`/`Invalid` 등 인증·연결 관련 핵심 응답을 처리.
 - **`OnResTokenExpired`/`Invalid`/`NotSupplied`**: 토큰 문제 발생 시 `resetConnection`으로 해당 봇을 초기화 상태로 되돌려 다음 tick에 새 세션을 시작하도록 유도.
 
+  ```go
+  func resetConnection(ws *websocket.Conn) {
+      // reset connection in the next tick
+      botrequest.SocketIDs.Mu.Lock()
+      botProfile, ok := botrequest.SocketIDs.BotClients[ws]
+      if ok {
+          botProfile.ReqIdx = 0
+          botProfile.NeedReset = true
+          botrequest.SocketIDs.BotClients[ws] = botProfile
+      }
+      botrequest.SocketIDs.Mu.Unlock()
+  }
+  ```
+
 ### `handler_gen.go` / `handler_impl.go` / `model_gen.go` — Generated RPC Surface
 - 게임 백엔드가 노출하는 거의 모든 RPC(`ReqGetCharacters`, `ReqGetMetaInventory`, `ReqCreateDropship`, `ReqSelectEnvirosuit`, `ReqUpdateProspect` 등)에 대응하는 응답 handler와 struct 정의를 코드 생성기로 대량 생성. 각 handler는 공통적으로 `RecvAck`/`ReqIdx`를 갱신하여 `proceedNextMessage`의 상태 머신이 다음 요청으로 전진할 수 있게 함.
 - **`PrintLog` + Slow-request logging**: 요청 전송 시각(`LastSent`)부터 응답 수신까지의 경과 시간을 측정하여, `SlowlogTime` 임계값을 초과하는 요청만 선별 로깅 — 수백~수천 개 동시 요청 환경에서 병목이 되는 RPC를 식별하기 위한 부하 테스트 전용 계측(instrumentation).
 
+  ```go
+  func PrintLog(eventName string, times int, LastSent time.Time, socketID string) {
+      t := time.Now()
+      elapsed := t.Sub(LastSent)
+
+      log.Printf("%v : [x] Event: %q Times : %v Elapsed : %v UserID: %q ",
+          t, eventName, times, elapsed, socketID)
+
+      if botReq.Settings.Slowlog &&
+          time.Duration(botReq.Settings.SlowlogTime*float64(time.Second)) < elapsed {
+          Log.Printf("%v : [x] Event: %q Times : %v Elapsed : %v UserID: %q ",
+              t, eventName, times, elapsed, socketID)
+      }
+  }
+  ```
+
 ### `compress.go` — Payload Compression
 `Zip`/`Unzip`/`ZipSkipMarshal`로 zlib 압축을 래핑. `generateProspect`가 생성하는 대용량 Prospect blob 페이로드에 사용되어, 실제 세이브 데이터 전송 시의 압축 오버헤드까지 부하 테스트에 포함.
+
+```go
+// ZipSkipMarshal ...
+func ZipSkipMarshal(l []byte) ([]byte, error) {
+    b := bytes.Buffer{}
+
+    w := zlib.NewWriter(&b)
+    _, err := w.Write(l)
+    if err != nil {
+        return b.Bytes(), err
+    }
+    err = w.Close()
+    if err != nil {
+        return b.Bytes(), err
+    }
+    return b.Bytes(), nil
+}
+```
 
 ### `botrequest.go` — Scenario Configuration Model
 - **`BotSettings`**: gateway 주소, 로비 접속 정보, 봇 개수(`Botcount`), 계정 접두사/인덱스, 반복 횟수, tick 주기, slow-log 임계값 등 실행 전체를 제어하는 설정 스키마.
 - **`BotScenario`** / **`BotEvent`**: 가중치 기반(`Weight`) 랜덤 시나리오 선택(`GetRandomScenario`)을 지원하여, 서로 다른 행동 패턴(예: 여러 종류의 Prospect 플레이 루틴)을 확률적으로 혼합한 현실적인 트래픽 프로파일을 구성 가능.
+
+  ```go
+  // BotEvent ...
+  type BotEvent struct {
+      EventName    string `json:"eventname"`
+      Repeat       int    `json:"repeat"`
+      Delay        int64  `json:"delay"`
+      StringParam1 string `json:"stringparam1"`
+      IntParam1    int64  `json:"intparam1"`
+      Elapsed      int64
+      Times        int
+  }
+
+  // GetRandomScenario ...
+  func GetRandomScenario(scenarios []BotScenario) BotScenario {
+      totalWeight := int64(0)
+      for _, scenario := range scenarios {
+          totalWeight += scenario.Weight
+      }
+
+      weight := rand.Int63n(totalWeight)
+      for _, scenario := range scenarios {
+          weight -= scenario.Weight
+          if weight <= 0 {
+              return scenario
+          }
+      }
+      return BotScenario{}
+  }
+  ```
+
 - **`BotProfile`**: 봇 1개당 유지되는 전체 상태(인증 토큰, 현재 캐릭터/인벤토리/드롭십/Prospect 정보, 요청 진행 인덱스, 마지막 전송/핑 시각 등)를 담는 in-memory 세션 struct.
+
+  ```go
+  type BotProfile struct {
+      IsWaitingLobby bool
+      AuthKey        string
+      SocketID       string
+      ReqIdx         int  // index of requests. incremented when recieve a response from gateway
+      RecvAck        bool // false : waiting for gateway response, true : ready to send new request
+      IcarusProfile  model.OnlineProfileUser
+      Character      model.OnlineProfileCharacter
+      InventoryDelta model.InventoryDelta
+      Dropship       model.Dropship
+      ProspectInfo   model.ProspectInfo
+      Scenario       BotScenario // request lists
+      LastSent       time.Time
+      LastPing       time.Time
+      LobbyConn      *stomp.Conn // stomp connection
+      NeedReset      bool        // start from lobby
+  }
+  ```
+
 - **`GetBotRequest`**: `viper` 기반 설정 로딩과 command-line flag(`-botcount`, `-gatewayaddress` 등)를 결합하여, 파일 기본값을 CLI 인자로 override할 수 있는 유연한 실행 옵션 제공.
+
+  ```go
+  viper.SetConfigType("json")
+  viper.SetConfigFile("./request/botrequest.json")
+  err := viper.ReadInConfig()
+  ...
+  flag.StringVar(&gatewayAddress, "gatewayaddress", "ws://10.150.16.228:6001/ws", "Gateway address to connect.")
+  flag.IntVar(&botCount, "botcount", 1, "A number of Bot clients to run.")
+  flag.Parse()
+
+  flag.Visit(func(flag *flag.Flag) {
+      switch flag.Name {
+      case "gatewayaddress":
+          botReq.Settings.GatewayAddress = gatewayAddress // CLI overrides file value
+      case "botcount":
+          botReq.Settings.Botcount = botCount
+      }
+  })
+  ```
 
 ### `botrequest.json` — Scenario Definition
 실행할 시나리오를 선언적으로 정의하는 데이터 파일. `prerequests`(공통 초기화), `scenarios`(가중치 기반 선택 대상 시나리오 목록, 각 이벤트별 개별 `repeat`/`delay` 지정), `postrequests`로 구성되어, **코드 변경 없이 부하 패턴을 조정**할 수 있도록 설계.
 
+`ReqUpdateProspect`에 개별 `repeat`/`delay`를 지정해 세이브 동기화 빈도를 시나리오별로 다르게 부하 테스트하는 예시:
+
+```json
+{
+    "eventname" : "ReqGetAvailableProspects",
+    "delay" : 400
+},
+{
+    "eventname" : "ReqClaimProspect",
+    "stringparam1" : "Olympus_1",
+    "intparam1" : 36000
+},
+{
+    "eventname" : "ReqUpdateProspect",
+    "repeat" : 20,
+    "delay" : 5000
+},
+{
+    "eventname" : "ReqSettleProspect"
+}
+```
+
 ---
 
-## Notable Engineering Details
+## 주요 설계 세부 사항
 
 - **응답 기반 self-throttling 스케줄러**: 고정 요청 속도(fixed-rate)로 무작정 요청을 쏟아내는 대신, `RecvAck` 상태를 게이트로 사용해 각 봇이 자신의 이전 요청이 실제로 응답받은 뒤에만 다음 요청을 진행 — 이는 부하 테스트 도구 자신이 병목이 되어 백엔드의 실제 한계보다 낮은 처리량에서 잘못된 결론을 내리는 흔한 함정을 피하는 설계.
 - **로비-게이트웨이 이원 connection 재현**: 실제 클라이언트가 STOMP 기반 로비 대기열과 WebSocket 기반 gateway라는 서로 다른 프로토콜의 두 connection을 순차적으로 사용하는 구조를, 부하 테스트 도구에서도 동일하게 재현 — 프로덕션과 이질적인 단축 경로(shortcut)를 통한 부정확한 부하 시뮬레이션을 방지.

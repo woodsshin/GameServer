@@ -16,6 +16,69 @@ epoll 기반 비동기 I/O, DB 커넥션 풀, 스레드 분리 아키텍처로 �
 - 신규 소켓 등록, 쓰기 요청, 강제 종료 요청 등 스레드 경계를 넘나드는 통지는 `eventfd`와 `epoll_wait`를 조합해 처리하여, worker 스레드가 불필요한 폴링 없이 이벤트 기반으로만 활성화됩니다.
 - 소켓은 **Edge-triggered(EPOLLET)** 모드로 등록되며, `HandleReadable`/`HandleWritable`이 이벤트가 발생할 때마다 `EAGAIN`이 반환될 때까지 read/write를 반복하는 논블로킹 루프로 처리합니다. Level-triggered 방식은 처리되지 않은 데이터가 남아있는 한 `epoll_wait`가 동일한 fd를 계속 반환하지만, Edge-triggered는 상태가 변화하는 시점에 한 번만 통지하므로 동일 fd에 대한 `epoll_wait` 반환 및 관련 시스템 콜 호출 횟수를 줄일 수 있습니다. 신규 쓰기 요청을 Edge-triggered로 등록한 직후에는 소켓 버퍼에 여유가 있어도 별도의 `EPOLLOUT` 이벤트가 발생하지 않을 수 있어, 등록과 동시에 한 번 직접 flush를 시도하여 첫 전송 지연을 없앴습니다.
 
+```cpp
+// NetServer.cpp - 신규 소켓을 EPOLLET(edge-triggered)로 등록
+for (int newFd : newFds) {
+    uint64_t sessionId = nextSessionId_.fetch_add(1);
+    auto session = std::make_shared<Session>(newFd, sessionId);
+    sessionManager_.Add(session);
+    localSessions[newFd] = session;
+
+    epoll_event sev{};
+    sev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
+    sev.data.fd = newFd;
+    epoll_ctl(epollFd_, EPOLL_CTL_ADD, newFd, &sev);
+}
+
+// 송신 대기 소켓에 EPOLLOUT 추가 등록 (ET 모드 유지)
+for (int wfd : writeFds) {
+    auto it = localSessions.find(wfd);
+    if (it == localSessions.end()) continue;
+    epoll_event sev{};
+    sev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLET;
+    sev.data.fd = wfd;
+    epoll_ctl(epollFd_, EPOLL_CTL_MOD, wfd, &sev);
+    // ET 모드에서는 등록 시점에 이미 소켓 버퍼에 여유가 있어도
+    // 별도 EPOLLOUT 이벤트가 발생하지 않을 수 있으므로, 등록 직후
+    // 한 번 직접 flush를 시도해 첫 전송 지연을 없앤다.
+    HandleWritable(it->second);
+}
+```
+
+```cpp
+// NetServer.cpp - HandleReadable: EAGAIN까지 반복하는 논블로킹 루프
+void IoWorker::HandleReadable(std::shared_ptr<Session>& session) {
+    char tmp[4096];
+    int fd = session->GetFd();
+
+    while (true) {
+        ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
+        if (n > 0) {
+            auto& buf = session->RecvBuffer();
+            buf.insert(buf.end(), tmp, tmp + n);
+            session->TouchRecvTime();
+
+            if (buf.size() > proto::MAX_PACKET_SIZE * 4) {
+                CloseSession(session); // 비정상 클라이언트 방어
+                return;
+            }
+        } else if (n == 0) {
+            CloseSession(session); // 정상 종료 (FIN)
+            return;
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break; // 이번 이벤트에서 읽을 수 있는 만큼 다 읽음
+            }
+            if (errno == EINTR) continue;
+            CloseSession(session);
+            return;
+        }
+    }
+
+    TryDispatchPackets(session);
+}
+```
+
 ### 2. DB 비동기 처리 (Head-of-Line Blocking 회피 + 재연결)
 IoWorker 스레드가 로그인/회원가입 처리 중 블로킹 방식의 MySQL 쿼리를 직접 호출할 경우, 해당 스레드에 연결된 **다른 모든 소켓**의 이벤트 처리가 쿼리 응답 대기 시간만큼 지연됩니다(Head-of-Line Blocking). 이를 방지하기 위해 다음과 같은 파이프라인을 구성했습니다.
 
@@ -29,15 +92,131 @@ DB worker 스레드:   큐에서 Task Pop → 커넥션 풀에서 커넥션 대�
 - `NetServer::SendPacket`은 호출 스레드에 관계없이 안전하게 동작합니다. 세션의 송신 큐는 mutex로 보호되며, 대상 세션이 속한 worker에는 `eventfd`를 통해 쓰기 이벤트가 통지됩니다.
 - **DB 재연결**: `MYSQL_OPT_RECONNECT`(클라이언트 라이브러리의 자동 재연결 옵션)는 최신 버전에서 deprecated되었고, 재연결 시 세션 상태가 조용히 초기화되는 위험이 있어 사용하지 않았습니다. 대신 `DBTask::execute`가 `ScopedConnection&`을 전달받아, 쿼리 실행 후 `mysql_errno()` 값이 `CR_SERVER_GONE_ERROR`/`CR_SERVER_LOST` 등 연결 유실 코드에 해당하는지(`IsConnectionLostError`) 직접 판별합니다. 연결 유실로 판단되면 `MarkBroken()`으로 표시하고, `ScopedConnection` 소멸 시점에 `DBConnectionPool::Reconnect()`가 새 커넥션을 맺어 풀에 반납합니다. `DBWorkerPool::WorkerLoop`는 이 표시를 확인하여 동일한 Task를 최대 1회 재시도합니다(문법 오류 등 재연결로 해결되지 않는 실패는 재시도하지 않고 로그로 남깁니다).
 
+```cpp
+// DBConnectionPool.h - ScopedConnection: 소멸 시 MarkBroken 여부를 보고 재연결
+class ScopedConnection {
+public:
+    explicit ScopedConnection(DBConnectionPool& pool)
+        : pool_(pool), conn_(pool.Acquire()) {}
+
+    ~ScopedConnection() {
+        if (broken_) {
+            MYSQL* fresh = pool_.Reconnect(conn_);
+            conn_ = fresh; // 실패하면 nullptr; 다음 Acquire 호출자가 쿼리 실행 시
+                           // 즉시 실패를 감지하고 다시 MarkBroken()을 호출하며 재시도된다.
+        }
+        if (conn_) {
+            pool_.Release(conn_);
+        }
+    }
+
+    MYSQL* Get() const { return conn_; }
+
+    // 쿼리 실행 중 연결 유실(CR_SERVER_GONE_ERROR, CR_SERVER_LOST 등)을
+    // 감지했을 때 호출자가 표시. 소멸 시점에 재연결을 거친 뒤 반납된다.
+    void MarkBroken() { broken_ = true; }
+
+private:
+    DBConnectionPool& pool_;
+    MYSQL* conn_;
+    bool broken_ = false;
+};
+```
+
+```cpp
+// DBWorker.h - WorkerLoop: 연결 유실 감지 시 최대 1회 재연결 후 재시도
+void WorkerLoop() {
+    while (true) {
+        auto taskOpt = taskQueue_.WaitPop();
+        if (!taskOpt.has_value()) break; // shutdown
+
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            DBConnectionPool::ScopedConnection conn(dbPool_);
+            if (!conn.Get()) break; // 재연결까지 실패
+
+            bool connectionLost = false;
+            try {
+                taskOpt->execute(conn);
+                connectionLost = IsConnectionLostError(conn.Get());
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[DBWorker] 작업 처리 중 예외: %s\n", e.what());
+            }
+
+            if (connectionLost) {
+                conn.MarkBroken(); // 소멸 시 재연결 후 반납됨
+                continue; // 재시도
+            }
+            break; // 성공했거나, 재시도로 해결되지 않는 오류이므로 종료
+        }
+    }
+}
+```
+
 ### 3. 패킷 프로토콜 및 스트림 처리
 - `[4B TotalSize][2B PacketType][Body]` 구조의 길이 기반 바이너리 프로토콜을 사용합니다.
 - TCP는 스트림 기반 프로토콜이므로 한 번의 `recv` 호출에 여러 패킷이 결합되어 수신되거나, 하나의 패킷이 여러 번에 걸쳐 분할 수신될 수 있습니다. 이를 처리하기 위해 `Session::RecvBuffer()`에 데이터를 누적하고, 완성된 패킷만 추출하여 디스패치하며 나머지는 다음 `recv` 호출까지 보존합니다.
 - 부분 전송(`send` 호출 시 요청한 크기만큼 전송되지 않는 경우, short write)도 `EPOLLOUT` 이벤트를 기반으로 이어서 처리됩니다.
 
+```cpp
+// NetServer.cpp - TryDispatchPackets: 길이 기반으로 완성된 패킷만 잘라 디스패치
+void IoWorker::TryDispatchPackets(std::shared_ptr<Session>& session) {
+    auto& buf = session->RecvBuffer();
+
+    size_t consumed = 0;
+    while (buf.size() - consumed >= proto::HEADER_SIZE) {
+        const char* base = buf.data() + consumed;
+        auto* header = reinterpret_cast<const proto::PacketHeader*>(base);
+
+        if (header->totalSize < proto::HEADER_SIZE || header->totalSize > proto::MAX_PACKET_SIZE) {
+            CloseSession(session); // 비정상 패킷 크기 방어
+            return;
+        }
+
+        if (buf.size() - consumed < header->totalSize) {
+            break; // 아직 body가 다 도착하지 않음 -> 다음 recv를 기다림
+        }
+
+        auto type = static_cast<proto::PacketType>(header->type);
+        const char* body = base + proto::HEADER_SIZE;
+        size_t bodySize = header->totalSize - proto::HEADER_SIZE;
+
+        packetHandler_(session, type, body, bodySize);
+        consumed += header->totalSize;
+    }
+
+    if (consumed > 0) {
+        buf.erase(buf.begin(), buf.begin() + consumed); // 남은 부분 패킷은 버퍼에 보존
+    }
+}
+```
+
 ### 4. 동시성 안전 세션 관리 및 버퍼 공유
 - `SessionManager`는 `std::shared_mutex`를 사용합니다. 채팅 브로드캐스트와 같이 "전체 순회 + 읽기" 연산이 빈번한 경우 `shared_lock`으로 동시 진입을 허용해 처리량을 확보하고, 세션 추가/삭제와 같이 컨테이너 구조가 변경되는 연산에만 `unique_lock`을 적용합니다.
 - 브로드캐스트 시 락을 보유한 상태로 `send()`까지 수행하지 않도록, 세션 목록의 스냅샷만 획득한 뒤 즉시 락을 해제하고 순회하며 전송합니다(락 보유 시간 최소화).
 - **송신 버퍼는 `shared_ptr<const vector<char>>`(`PacketBuffer`)로 공유합니다.** 브로드캐스트로 동일한 패킷을 N명에게 전송할 때 세션마다 `vector<char>`를 복사하지 않고, `NetServer::BroadcastPacket`이 버퍼를 하나만 생성하여 각 세션의 송신 큐에는 참조 카운트만 증가시켜 전달합니다. 실제 바이트 복사는 각 세션이 소켓에 `send()`를 호출할 때 커널로 넘어가는 한 번뿐이며, 이는 어떤 전송 방식을 쓰더라도 피할 수 없는 복사입니다.
+
+```cpp
+// Session.h - 송신 큐는 shared_ptr<const vector<char>>(PacketBuffer)를 보관
+using PacketBuffer = std::shared_ptr<const std::vector<char>>;
+
+bool EnqueueSend(PacketBuffer data) {
+    std::lock_guard<std::mutex> lock(sendMutex_);
+    bool wasEmpty = sendQueue_.empty();
+    sendQueue_.push_back(std::move(data)); // 벡터 복사 없이 shared_ptr만 큐에 적재
+    return wasEmpty;
+}
+```
+
+```cpp
+// NetServer.cpp - BroadcastPacket: 버퍼 하나를 N명이 참조 카운트만 늘려 공유
+void NetServer::BroadcastPacket(SessionManager& sessionManager, PacketBuffer packetData, uint64_t excludeSessionId) {
+    auto sessions = sessionManager.SnapshotAuthenticated();
+    for (auto& s : sessions) {
+        if (s->GetSessionId() == excludeSessionId) continue;
+        SendPacket(s, packetData); // shared_ptr 복사(참조 카운트 증가)만 발생, 버퍼 자체는 공유
+    }
+}
+```
 
 ### 5. 보안 및 안정성
 - 비밀번호는 계정별 랜덤 salt와 SHA-256 스트레칭(10,000라운드)을 적용하여 저장하며, 평문 비교 로직은 존재하지 않습니다.
@@ -46,6 +225,36 @@ DB worker 스레드:   큐에서 Task Pop → 커넥션 풀에서 커넥션 대�
 - **서버 주도 강제 종료**: 통지만 전송하고 클라이언트의 자발적인 연결 해제를 기다리는 대신, `IoWorker`에 강제 종료 큐(`pendingForceCloseFds_`)를 별도로 두었습니다. `HeartbeatMonitorLoop`가 타임아웃을 감지하면 `NetServer::ForceDisconnect`를 호출하고, 이 요청은 해당 세션을 소유한 `IoWorker`의 큐에 적재된 뒤 `eventfd`로 해당 워커를 깨워 실제 `close()`까지 서버가 직접 수행합니다. 통지를 무시하는 악성/오작동 클라이언트도 좀비 세션으로 남지 않습니다.
 - 비정상적인 패킷 크기 또는 과도한 recv 버퍼 누적이 감지되면 연결을 강제 종료합니다(악성/오작동 클라이언트 방어).
 - `SIGPIPE` 시그널을 무시 처리하여 클라이언트의 비정상 종료가 서버 프로세스 종료로 이어지지 않도록 합니다.
+
+```cpp
+// NetServer.cpp - ForceDisconnect: 세션을 소유한 IoWorker의 큐에 종료 요청을 적재
+void NetServer::ForceDisconnect(std::shared_ptr<Session> session) {
+    if (!session) return;
+    session->MarkForForceClose(); // 이후 신규 송신 요청이 조용히 무시되도록 먼저 표시
+
+    int fd = session->GetFd();
+    int workerIdx = -1;
+    {
+        std::lock_guard<std::mutex> lock(fdWorkerMapMutex_);
+        auto it = fdToWorkerIndex_.find(fd);
+        if (it != fdToWorkerIndex_.end()) workerIdx = it->second;
+    }
+    if (workerIdx >= 0) {
+        // 실제 close()는 이 fd를 소유한 IoWorker 스레드에서 강제종료 큐를 통해 수행된다.
+        workers_[workerIdx]->RequestForceClose(fd);
+    }
+}
+```
+
+```cpp
+// NetServer.cpp - IoWorker: eventfd로 깨어난 뒤 강제 종료 큐를 처리
+for (int cfd : forceCloseFds) {
+    auto it = localSessions.find(cfd);
+    if (it == localSessions.end()) continue;
+    CloseSession(it->second); // 이 fd를 소유한 스레드 안에서만 close() 수행
+    localSessions.erase(it);
+}
+```
 
 ## 디렉토리 구조
 ```

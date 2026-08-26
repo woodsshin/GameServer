@@ -33,6 +33,69 @@ Admin Client (internal network)
 ### `admin_proxy.go` — HTTP Router & RabbitMQ Connection Lifecycle
 - **`connectToRabbitMQ` / `rabbitConnector`**: connection 종료 이벤트(`NotifyClose`)를 channel로 감지하여 자동 재연결하는 supervisor 패턴. 재연결 시마다 `PL`/`GW` exchange를 재선언하고, exclusive/durable return queue를 새로 생성한 뒤 consumer를 등록.
 - **응답 소비 loop**: return queue에 도착하는 모든 message를 `model.QueueMessage`로 unmarshal하여 `handler.HandleResponse`로 위임하고, 수동 `Ack`로 명시적 처리 완료를 선언.
+
+**Code: RabbitMQ 재연결 supervisor + consume loop** (`admin_proxy.go`)
+
+```go
+func rabbitConnector(uri string) {
+	var rabbitErr *amqp.Error
+	for {
+		rabbitErr = <-rabbitCloseError
+		if rabbitErr != nil {
+			log.Printf("Connecting to RabbitMQ")
+			conn = connectToRabbitMQ(uri)
+			rabbitCloseError = make(chan *amqp.Error)
+			conn.NotifyClose(rabbitCloseError)
+			ch, err := conn.Channel()
+			mqChannel = ch
+
+			logger.FailOnError(err)
+
+			err = ch.ExchangeDeclare(model.PLExchange, amqp.ExchangeDirect, true, false, false, false, nil)
+			logger.FailOnError(err)
+
+			err = ch.ExchangeDeclare(model.GWExchange, amqp.ExchangeDirect, true, false, false, false, nil)
+			logger.FailOnError(err)
+
+			returnQueue, err = ch.QueueDeclare(
+				"",    // name
+				true,  // durable
+				false, // delete when unused
+				true,  // exclusive
+				false, // no-wait
+				nil,   // arguments
+			)
+			logger.FailOnError(err)
+
+			queueName = returnQueue.Name
+
+			delivery, err := ch.Consume(
+				returnQueue.Name,
+				"",
+				false,
+				false,
+				false,
+				false,
+				nil,
+			)
+			logger.FailOnError(err)
+
+			// 응답 소비 loop: return queue → model.QueueMessage → handler.HandleResponse
+			go func() {
+				for mqMessage := range delivery {
+					var queueMsg model.QueueMessage
+					err := json.Unmarshal(mqMessage.Body, &queueMsg)
+					logger.LogNonFatalError(err)
+
+					handler.HandleResponse(&queueMsg, ch)
+					mqMessage.Ack(false)
+				}
+			}()
+		}
+	}
+}
+```
+
 - **`/update`**: query parameter(`gw`/`pl`)에 따라 Gateway에는 broadcast(direct exchange의 모든 binding에 전달), Player Service에는 round-robin(단일 consumer가 처리) 방식으로 `ReqUpdateGameData` 메시지를 전달.
 - **`/reset`**, **`/version`**: 각각 전체 talent 초기화, 최소 클라이언트 버전 갱신을 위한 fire-and-forget 관리 endpoint.
 - **`adminHandler` (`/admin`)**: 범용 admin RPC gateway.
@@ -47,6 +110,36 @@ Admin Client (internal network)
 - **`HandleAdminRequest`**: event name을 `adminPLRPCs`/`adminSMRPCs` 화이트리스트와 대조하여 목적지 exchange(Player Service 또는 Session Manager)를 결정하고, 미등록 RPC는 명시적으로 거부. 이후 `frameIdx`를 key로 `context.Context`와 `context.CancelFunc`를 각각 저장하여, 비동기로 도착할 응답과 현재 대기 중인 HTTP 요청을 연결할 수 있는 상태를 마련.
 - **`HandleResponse`**: 수신한 message의 event name으로 등록된 handler를 조회해 실행하는 단순 dispatcher.
 - **`sendMqMsg`**: 모든 발행 message에 `Persistent` delivery mode를 지정하여 RabbitMQ 재시작 시에도 유실 없이 보존.
+
+**Code: RabbitMQ publish** (`handler.go`)
+
+```go
+func sendMqMsg(mqChannel *amqp.Channel, exchange string, key string, queueMsg *model.QueueMessage) error {
+	body, err := json.Marshal(queueMsg)
+
+	if err == nil {
+		err = mqChannel.Publish(
+			exchange,
+			key,
+			false,
+			false,
+			amqp.Publishing{
+				DeliveryMode: amqp.Persistent,
+				ContentType:  "application/json",
+				Body:         body,
+			})
+	}
+
+	if err == nil {
+		event := time.Now()
+		log.Printf("%v : [x] MqMsg Sent Id: %q Event: %q to %q", event, queueMsg.SocketID, queueMsg.EventName, exchange)
+	}
+	logger.LogNonFatalError(err)
+	return err
+}
+```
+
+`exchange`와 `key`는 라우팅 전략에 따라 달리 조합됩니다: Gateway broadcast는 `(model.GWExchange, model.APExchange)`, Player Service round-robin은 `(model.PLExchange, model.PLExchange)`처럼 목적지 exchange와 binding key를 동일하게 맞춰 단일 consumer에게 전달합니다.
 
 ### `handler_custom.go` — RPC Whitelist & Response Handlers
 - `registerCustom()`에서 Profile, Prospect, Notification, Challenges, Inventory, Workshop, Talents, Drop Loadout 등 도메인별로 방대한 admin RPC 목록(`ReqXxx` → `ResXxx`)을 화이트리스트에 등록. 이 목록이 사실상 admin tool이 호출 가능한 API surface의 명세 역할을 함.
@@ -63,9 +156,104 @@ Admin Client (internal network)
 ### `adminrpc.go`
 Admin RPC 전용 header key(`frameidx`)와 parameter 이름 상수, 표준 에러 응답 struct(`ResAdminError`) 정의.
 
+### `parser.go` — STOMP 스타일 커스텀 메시지 인코더/디코더
+`WsMessage`는 [STOMP](https://stomp.github.io/)와 유사한 text-frame 구조(`command/event line` → `header lines` → 빈 줄 → `body`)를 직접 구현한 경량 프로토콜입니다. RabbitMQ 위에서 오가는 `model.QueueMessage`(JSON)와는 별개로, WebSocket 등 다른 transport와의 연동을 위해 사용되는 것으로 보이는 frame 포맷입니다.
+
+```
+EventName
+header1:value1
+header2:value2
+
+<raw event payload bytes>
+```
+
+- **`Encode()`**: event name → header 목록 → 빈 줄 → payload 순으로 이어붙여 byte slice를 생성.
+- **`Decode()`**: 첫 줄을 event name으로, 이어지는 `key:value` 줄들을 header map으로 파싱하다가 빈 줄을 만나면 header 파싱을 종료. `datalength` header가 존재하면 이를 신뢰해 전체 buffer의 뒤에서부터 해당 길이만큼을 payload로 잘라내며(embedded newline이나 null byte를 포함한 binary-safe payload 지원), 없으면 남은 줄들을 이어붙여 payload로 사용.
+
+**Code: STOMP 스타일 frame encoder/decoder** (`parser.go`)
+
+```go
+// WsMessage ...
+type WsMessage struct {
+	EventName string
+	Headers   map[string]string
+	Event     []byte
+}
+
+// Encode ...
+func (s *WsMessage) Encode() []byte {
+	b := make([]byte, 0)
+
+	b = append(b, []byte(fmt.Sprintf("%v\n", s.EventName))...)
+	for k, v := range s.Headers {
+		b = append(b, []byte(fmt.Sprintf("%v:%v\n", k, v))...)
+	}
+	b = append(b, []byte{'\n'}...)
+	b = append(b, s.Event...)
+
+	return b
+}
+
+// Decode ...
+func (s *WsMessage) Decode(b []byte) error {
+	isHeader := false
+	byteLines := bytes.Split(b, []byte{'\n'})
+	for i, line := range byteLines {
+		if i == 0 {
+			event := string(line)
+			s.EventName = event
+			isHeader = true
+			continue
+		}
+		if isHeader {
+			if len(s.Headers) == 0 {
+				s.Headers = make(map[string]string)
+			}
+			header := string(line)
+			if header == "\n" || len(header) < 1 {
+				isHeader = false
+				if _, ok := s.Headers["datalength"]; ok {
+					break
+				}
+				continue
+			}
+			h := strings.Split(header, ":")
+			s.Headers[h[0]] = h[1]
+			continue
+		}
+		if len(s.Event) == 0 {
+			s.Event = make([]byte, 0)
+		}
+		if len(line) > 0 {
+			if line[len(line)-1] != 0 {
+				s.Event = append(s.Event, line...)
+			} else {
+				s.Event = append(s.Event, line[:len(line)-1]...)
+			}
+		}
+	}
+	if _, ok := s.Headers["datalength"]; ok {
+		dataLength, err := strconv.Atoi(s.Headers["datalength"])
+		if err != nil {
+			return err
+		}
+		// Get event information by splicing []byte based on data length header
+		eventBytes := b[len(b)-dataLength:]
+		if len(s.Event) == 0 {
+			s.Event = make([]byte, 0)
+		}
+		s.Event = append(s.Event, eventBytes...)
+		return nil
+	}
+	return nil
+}
+```
+
+> **Note**: `admin_proxy`, `handler`, `handler_custom` 등 이 저장소에 포함된 코드에서는 `parser.WsMessage`를 직접 사용하는 지점이 보이지 않습니다. `model.QueueMessage`(JSON)가 RabbitMQ 메시지 envelope로 사용되고 있어, `parser.go`는 다른 서비스(예: Gateway ↔ client WebSocket 연동)와 공유되는 유틸리티 패키지이거나, 향후/다른 transport 통합을 위한 코드로 추정됩니다.
+
 ---
 
-## Notable Engineering Details
+## 주요 설계 세부 사항
 
 - **`context.Context`를 message correlation ID로 활용**: 표준 라이브러리의 `context` 패키지를 request timeout뿐 아니라 **비동기 RPC 응답을 특정 HTTP 요청에 매칭시키는 pub/sub correlation 메커니즘**으로 전용(轉用). `frameIdx`를 key로 하는 global map(`frameHandlers`, `contextFuncs`)에 각 요청의 `Context`/`CancelFunc`를 등록해두고, 응답 handler가 `CancelFunc()`를 호출하는 순간 대기 중이던 polling loop가 `context.Canceled`를 감지해 응답을 반환 — condition variable 없이 표준 라이브러리만으로 동기/비동기 브릿지를 구현.
 - **Exchange 단위의 라우팅 전략 분리**: 동일한 `ReqUpdateGameData` 이벤트라도 목적지에 따라 direct exchange의 broadcast 특성(Gateway, 모든 인스턴스에 전파)과 round-robin 특성(Player Service, 단일 인스턴스가 처리)을 의도적으로 구분해서 사용 — 상태를 갖지 않는 Gateway 갱신과 상태를 가진 Player Service 갱신의 성격 차이를 exchange/queue 바인딩 설계로 반영.

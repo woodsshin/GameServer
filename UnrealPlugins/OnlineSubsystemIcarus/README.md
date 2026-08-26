@@ -78,7 +78,7 @@ Matchmaking 대기열 telemetry를 위한, 메인 connection과 독립적인 두
 
 ---
 
-## Notable Engineering Details
+## 주요 설계 세부 사항
 
 - **모드 전환 시 interface hot-swap**: `SwitchOnlineMode()`는 `UIcarusConnectionComponent`(온라인)와 `UIcarusOfflineConnectionComponentGen`(오프라인) 사이를 전환하며, `Identity`, `Session`, `UserCloud`, `MessageListeners` 등 종속된 모든 interface의 callback을 다시 bind — 서브시스템 재초기화 없이 온라인/오프라인 fallback을 매끄럽게 지원.
 - **통합된 실패 처리 경로**: timeout 만료와 복구 불가능한 전송 실패 모두 `FIcarusWSFrame::SetOfflineModeCommand`를 통해 응답 프레임을 synthesize한 뒤, 실제 서버 응답이 사용하는 것과 *동일한* `FrameHandler` table로 dispatch — RPC 호출부는 원인과 무관하게 단일한 실패 처리 코드 경로만 다루면 됨.

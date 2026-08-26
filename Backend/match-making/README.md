@@ -35,12 +35,82 @@ C#/.NET gRPC 기반 매치메이킹 백엔드. 게임 클라이언트와 데디�
 4. 빈 세션을 찾으면 바로 `CreatePlayerSession`으로 합류 처리 (신규 배치 비용 절감)
 5. 못 찾으면 GameLift `StartMatchmakingAsync`(FlexMatch)를 호출해 새 매치메이킹 티켓 발급 후, 완료될 때까지 폴링 (`WaitMatchmakingAsync`)
 
+```csharp
+// 가장 가까운 리전 선택 후 클라이언트 초기화
+InitializeGameLiftClient(bestRegion);
+
+// 1순위: 빈 슬롯이 있는 기존 세션 탐색
+var matchMakingReponse = await SearchGameSessionAsync(request, _configureName);
+if (matchMakingReponse.Ticket != null)
+{
+    _logger.LogInformation("Found GameSession {@PlayerId} : {@ConnectionInfo}",
+        new PlayerId(request.PlayerId), matchMakingReponse.Ticket.GameSessionConnectionInfo);
+    return matchMakingReponse;
+}
+
+// 2순위: 못 찾으면 FlexMatch로 신규 매치메이킹 시작 후 완료까지 폴링
+var response = await _gameliftclient.StartMatchmakingAsync(matchmakingRequest);
+matchMakingReponse = await WaitMatchmakingAsync(response.MatchmakingTicket);
+return matchMakingReponse;
+```
+
+**빈 슬롯 탐색 (`SearchGameSessionAsync`)** — `hasAvailablePlayerSessions=true` 필터로 검색 후, 실제 여유 슬롯(`MaximumPlayerSessionCount - CurrentPlayerSessionCount > 0`)이 있는 세션에 바로 합류시킵니다:
+
+```csharp
+var request = new SearchGameSessionsRequest
+{
+    AliasId = _aliasId,
+    FilterExpression = "hasAvailablePlayerSessions=true",
+    SortExpression = "playerSessionCount DESC",
+    Limit = 10,
+    Location = regionName
+};
+
+var response = await _gameliftclient.SearchGameSessionsAsync(request);
+
+foreach (var gamesession in response.GameSessions)
+{
+    if (gamesession.MaximumPlayerSessionCount - gamesession.CurrentPlayerSessionCount > 0)
+    {
+        var matchedPlayerSession = await CreatePlayerSessionAsync(gamesession.GameSessionId, matchmakingRequest.PlayerId);
+        // ... 접속 정보(GameSessionConnectionInfo) 채운 뒤 COMPLETE 상태로 반환
+    }
+}
+```
+
 ### 2. 플레이어 세션 생성 (`CreatePlayerSession`)
 - 대상 게임 세션이 `ACTIVE` 상태인지 확인 후 플레이어 세션 발급
 
 ### 3. 게임 세션 생성 (`CreateGameSession`)
 - `GameDataId` 기준으로 기존 세션을 먼저 검색(재사용), 없으면 신규 세션 생성 후 `ACTIVE` 상태가 될 때까지 대기(`CreateAndWaitGameSessionAsync`)
 - `IdempotencyToken`으로 중복 요청 방지
+
+```csharp
+// GameDataId로 기존 세션을 먼저 찾아 재사용
+if (request.GameDataId != null)
+{
+    var gamession = await SearchGameSessionByGameDataIdAsync(request.GameDataId);
+    if (gamession.GameSessionId != null)
+    {
+        var playersession = await CreatePlayerSessionAsync(gamession.GameSessionId, request.CreatorId);
+        return new GrpcMatchMaking.CreateGameSessionResponse()
+        {
+            GameSessionId = gamession.GameSessionId,
+            CreatorId = request.CreatorId,
+            PlayerSessionId = playersession.PlayerSessionId,
+            IpAddress = gamession.IpAddress,
+            Port = gamession.Port,
+        };
+    }
+}
+
+// 없으면 신규 생성 + IdempotencyToken으로 중복 방지
+if (request.IdempotencyToken != null && request.IdempotencyToken.Length > 0)
+{
+    createRequest.IdempotencyToken = request.IdempotencyToken;
+}
+var response = await CreateAndWaitGameSessionAsync(createRequest);
+```
 
 ### 4. 데디케이티드 서버 전용 API (`StartMatchMakingDS`, `CreateGameSessionDS`)
 - 서버가 리전을 직접 지정해 매치메이킹/세션 생성을 트리거하는 별도 엔드포인트 (S2S 인증)
@@ -68,12 +138,102 @@ options.AddPolicy(AuthPolicy.DedicatedServer, policy => {
 
 각 gRPC 서비스 클래스는 `[Authorize(Policy = ...)]`로 어떤 스킴을 요구하는지 명시하여, 클라이언트용 엔드포인트와 서버용 엔드포인트가 서로 다른 신뢰 경계를 갖도록 분리했습니다.
 
+```csharp
+[Authorize(Policy = AuthPolicy.EpicUser)]
+public class MatchMakingService : MatchMakingSvc.MatchMakingSvcBase
+{
+    // 게임 클라이언트가 호출: StartMatchMaking, CreatePlayerSession, CreateGameSession
+}
+
+[Authorize(Policy = AuthPolicy.DedicatedServer)]
+public class MatchMakingServiceDS : MatchMakingSvcDS.MatchMakingSvcDSBase
+{
+    // 데디케이티드 서버가 호출: StartMatchMakingDS, CreateGameSessionDS
+}
+```
+
 ## GameLift 연동 세부사항
 
 - **리전 → Alias ID 매핑**: `GameLiftSettings`에서 리전 코드(`eu-central-1`, `ap-southeast-2` 등)를 GameLift Alias ID로 매핑, 레이턴시가 가장 낮은 리전을 골라 해당 Alias로 라우팅
 - **인증 방식**: `IAMRole` 또는 Access Key/Secret Key 두 가지 방식을 설정으로 전환 가능 (`GameLiftSettings.AWSAuthenticationType`)
-- **세션 배치 대기**: 세션 생성 후 `DescribeGameSessionsAsync`를 폴링하며 `ACTIVE` 상태를 기다리고, `TIMED_OUT`/`FAILED`/`CANCELLED`/`TERMINATED`는 실패로 처리
-- **매치메이킹 티켓 폴링**: `DescribeMatchmakingAsync`로 상태(`COMPLETED`/`SEARCHING`/`FAILED` 등)를 확인하며 완료 또는 실패까지 대기
+
+```csharp
+private void InitializeGameLiftClient(RegionEndpoint region)
+{
+    _region = region;
+    _aliasId = _gameLiftSettings.GetRegionAliasId(_region.SystemName);
+
+    if (_gameLiftSettings.AWSAuthenticationType == "IAMRole")
+    {
+        _gameliftclient = new AmazonGameLiftClient(_region);
+    }
+    else
+    {
+        var credentials = new BasicAWSCredentials(_accessKey, _secretKey);
+        _gameliftclient = new AmazonGameLiftClient(credentials, _region);
+    }
+}
+```
+
+- **세션 배치 대기**: 세션 생성 후 `DescribeGameSessionsAsync`를 5초 간격으로 폴링하며 `ACTIVE` 상태를 기다리고, `TIMED_OUT`/`FAILED`/`CANCELLED`/`TERMINATED`는 실패로 처리
+
+```csharp
+var hasPlaced = false;
+var failedPlace = false;
+while (!hasPlaced && !failedPlace)
+{
+    await Task.Delay(5000);
+    var describeResponse = await _gameliftclient.DescribeGameSessionsAsync(describeRequest);
+
+    foreach (var gamesession in describeResponse.GameSessions)
+    {
+        switch (gamesession.Status)
+        {
+            case "ACTIVE": hasPlaced = true; break;
+            case "ACTIVATING": break;
+            case "TIMED_OUT":
+            case "FAILED":
+            case "CANCELLED":
+            case "TERMINATED": failedPlace = true; break;
+        }
+    }
+}
+```
+
+- **매치메이킹 티켓 폴링**: `DescribeMatchmakingAsync`로 상태(`COMPLETED`/`SEARCHING`/`FAILED` 등)를 확인하며 완료 또는 실패까지 대기 (현재는 5초 간격 폴링 방식이며, API 호출량 이슈로 SNS 전환이 TODO로 남아 있음)
+
+```csharp
+// TODO : Pulling the same calls exceed your API limit, which results in errors.
+// Need to configure Amazon Simple Notification Service (SNS)
+var foundmatch = false;
+var failedmatch = false;
+while (!foundmatch && !failedmatch)
+{
+    await Task.Delay(5000);
+    var describeMatchmakingResponse = await _gameliftclient.DescribeMatchmakingAsync(describeMatchmakingRequest);
+
+    foreach (var foundTiket in describeMatchmakingResponse.TicketList)
+    {
+        switch (foundTiket?.Status)
+        {
+            case "COMPLETED":
+                foundmatch = true;
+                SetGameSessionInfo(foundTiket, ref matchMakingReponse);
+                break;
+            case "PLACING":
+            case "QUEUED":
+            case "SEARCHING":
+                break;
+            case "TIMED_OUT":
+            case "FAILED":
+            case "CANCELLED":
+                failedmatch = true;
+                break;
+        }
+        break;
+    }
+}
+```
 
 ## 프로토콜 정의 (`match_making.proto`)
 
@@ -101,8 +261,3 @@ options.AddPolicy(AuthPolicy.DedicatedServer, policy => {
 - **리전 인지 라우팅**: 클라이언트가 보낸 리전별 레이턴시 값을 기준으로 가장 가까운 GameLift 리전/Alias를 자동 선택
 - **이중 신뢰 경계**: 클라이언트(EOS)와 데디케이티드 서버(S2S)를 인증 스킴·정책 레벨에서 명확히 분리해, 서버 전용 API가 일반 유저 토큰으로 호출되지 않도록 강제
 - **비동기 폴링 기반 상태 관리**: GameLift가 세션 배치/매치메이킹을 완료할 때까지 `Task.Delay` 기반 폴링으로 대기(현재는 SNS 미연동 상태이며, 코드 내 TODO로 추후 이벤트 기반 전환 계획 명시)
-
-## 알려진 제한사항 / 개선 예정
-
-- 매치메이킹/세션 배치 상태 확인이 폴링 방식이라 GameLift API 호출량이 많아질 수 있음 → SNS 기반 이벤트 알림으로 전환 예정 (코드 내 TODO 주석 참고)
-- `GameDataId` 검색 시 필터 표현식(`AquaBSessionId` vs `GAMEDATAID`)에 대한 검증 필요 (TODO 표시)

@@ -1,6 +1,6 @@
 # lobbystats
 
-**RabbitMQ Management API**를 polling하여 매치메이킹 대기열 상태를 계산하고, **STOMP protocol**로 게임 클라이언트에 실시간 broadcast하는 Go 기반 백엔드 microservice입니다. Unreal Engine 클라이언트 측 `OnlineSubsystemIcarus`의 `IcarusLobbyConnectionComponent`가 구독하는 `ResLobbyStats` 이벤트를 생성하는 서버 측 counterpart입니다.
+**RabbitMQ Management API**를 polling하여 백엔드 대기열 상태를 계산하고, **STOMP protocol**로 게임 클라이언트에 실시간 broadcast하는 Go 기반 백엔드 microservice입니다. Unreal Engine 클라이언트 측 `OnlineSubsystemIcarus`의 `IcarusLobbyConnectionComponent`가 구독하는 `ResLobbyStats` 이벤트를 생성하는 서버 측 counterpart입니다.
 
 ---
 
@@ -39,10 +39,131 @@ RabbitMQ (STOMP) ◀──(WsMessage encoding)── lobbystats
   4. `parser.WsMessage`로 encoding한 뒤 STOMP `Send`를 통해 지정된 destination으로 broadcast.
 - **`Run`**: config 로딩, `mux` router 초기화, lobby connector goroutine 기동, 그리고 `/health` health check endpoint를 포함한 HTTP 서버(`:7071`)를 구동합니다.
 
+폴링 → 변환 → STOMP broadcast로 이어지는 핵심 루프는 다음과 같습니다:
+
+```go
+go func() {
+    for {
+        time.Sleep(time.Duration(conf.LobbyUpdateInterval) * time.Second)
+
+        resp, err := http.Get(url)
+        if err != nil {
+            logger.LogNonFatalError(err)
+            continue
+        }
+
+        body, err := ioutil.ReadAll(resp.Body)
+        if err != nil {
+            logger.LogNonFatalError(err)
+            continue
+        }
+
+        var lobbyStats model.LobbyStats
+        err = json.Unmarshal(body, &lobbyStats)
+        if err != nil {
+            continue
+        }
+
+        resLobbyStats := model.ResLobbyStats{QueueSize: lobbyStats.Messages, MessagesReadyRate: lobbyStats.Stats.DeliverDetails.Rate}
+        resLobbyStats.Maintenance.IsMaintenance = conf.IsMaintenance
+        resLobbyStats.Maintenance.StartTime = conf.MaintenanceStart
+        resLobbyStats.Maintenance.EndTime = conf.MaintenanceEnd
+        resLobbyStats.Maintenance.Message = conf.MaintenanceMessage
+
+        bytes, err := json.Marshal(resLobbyStats)
+        if err != nil {
+            continue
+        }
+
+        returnMsg := model.QueueMessage{Message: bytes, EventName: "ResLobbyStats"}
+        wsMsg := parser.WsMessage{EventName: returnMsg.EventName, Headers: returnMsg.Headers, Event: returnMsg.Message}
+        event := wsMsg.Encode()
+
+        err = lobbyConn.Send(conf.LobbyDestination, "application/json", event, nil)
+        if err != nil {
+            logger.LogNonFatalError(err)
+        }
+    }
+}()
+```
+
+STOMP connection 수립은 TLS/plain 두 경로로 나뉘며, 각각 독립적인 무한 retry loop을 가집니다:
+
+```go
+func connectToRabbitMQStomp(uri string) *stomp.Conn {
+    for {
+        if usetls {
+            netConn, err := tls.Dial("tcp", uri, &tls.Config{})
+            if err != nil {
+                logger.LogNonFatalError(err)
+                time.Sleep(2 * time.Second)
+                continue
+            }
+
+            lobbyConn, err := stomp.Connect(
+                netConn,
+                stomp.ConnOpt.Host("icarus"),
+                stomp.ConnOpt.Login(conf.LobbyUser, conf.LobbyPassword),
+            )
+
+            if err == nil {
+                return lobbyConn
+            }
+
+            logger.LogNonFatalError(err)
+            time.Sleep(2 * time.Second)
+        } else {
+            lobbyConn, err := stomp.Dial(
+                "tcp", uri,
+                stomp.ConnOpt.Host("/icarus"),
+                stomp.ConnOpt.Login(conf.LobbyUser, conf.LobbyPassword),
+            )
+            if err == nil {
+                return lobbyConn
+            }
+            logger.LogNonFatalError(err)
+            time.Sleep(5 * time.Second)
+        }
+    }
+}
+```
+
 ### `model.go` — Wire-Level Data Contracts
 - `LobbyStats` / `MessageStats` / `MessageDetails` — RabbitMQ Management API의 JSON 응답 스키마를 그대로 반영한 struct로, `message_stats.deliver_get_details.rate` 같은 nested field를 직접 매핑.
 - `ResLobbyStats` / `MaintenanceStatus` — 클라이언트에 전송되는 실제 payload. 필드명(`queueSize`, `messagesReadyRate`, `Maintenance`)이 Unreal 클라이언트 측 `FResLobbyStats` UStruct와 1:1로 대응하도록 설계됨.
 - `QueueMessage` — STOMP 전송 전 단계에서 사용되는 내부 wrapper.
+
+```go
+// Rabbitmq queue stats in json format
+type LobbyStats struct {
+    Stats     MessageStats `json:"message_stats"`
+    Messages  int          `json:"messages"`
+    QueueName string       `json:"name"`
+}
+
+type MessageStats struct {
+    DeliverDetails MessageDetails `json:"deliver_get_details"`
+    PublishDetails MessageDetails `json:"publish_details"`
+}
+
+type MessageDetails struct {
+    Rate float64 `json:"rate"`
+}
+
+// Return lobby stats message to game client
+type ResLobbyStats struct {
+    QueueSize         int               `json:"queueSize"`
+    MessagesReadyRate float64           `json:"messagesReadyRate"`
+    Maintenance       MaintenanceStatus `json:"Maintenance"`
+}
+
+type MaintenanceStatus struct {
+    IsMaintenance bool   `json:"isMaintenance"`
+    StartTime     int    `json:"startTime"`
+    EndTime       int    `json:"endTime"`
+    Message       string `json:"message"`
+}
+```
 
 ### `parser.go` — Custom Wire Protocol Codec
 - `WsMessage.Encode()`는 `EventName\nheader:value\n\nBody` 형태의 커스텀 프레임을 byte-level로 직접 조립.
@@ -51,7 +172,7 @@ RabbitMQ (STOMP) ◀──(WsMessage encoding)── lobbystats
 
 ---
 
-## Notable Engineering Details
+## 주요 설계 세부 사항
 
 - **Polling-to-push bridge 패턴**: RabbitMQ Management API는 pull 방식(HTTP polling)만 제공하지만, 게임 클라이언트는 push 방식(STOMP subscription)의 실시간 업데이트가 필요합니다. `lobbystats`는 이 두 모델 사이의 격차를 메우는 adapter 역할을 수행하며, 폴링 주기(`LobbyUpdateInterval`)를 config로 분리해 서버 부하와 클라이언트 반응성 사이의 trade-off를 운영 중 조정 가능하게 설계.
 - **Connection resilience**: TLS handshake와 STOMP connect 각각에 독립적인 retry loop을 두어, 네트워크 계층과 protocol 계층의 실패를 분리해서 처리. 이는 클라이언트 측 `UIcarusConnectionComponentBase`의 exponential backoff reconnect와 대칭을 이루는 서버 측 resilience 전략.
