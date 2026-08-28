@@ -21,7 +21,7 @@ Internal network 전용 관리 microservice. HTTP request를 RabbitMQ 기반 RPC
 **핵심 사용처**: 운영진의 게임 데이터 갱신, 계정/캐릭터 조회·수정, 유지보수 상태 관리 등 admin tool의 backend.
 
 ### [`botclient/`](./botclient/README.md) — Load Testing Simulator
-실제 게임 클라이언트와 동일하게 로비 진입 → JWT 인증 → gateway 연결 → RPC 시퀀스 실행이라는 전체 흐름을 다수의 가상 봇으로 동시 재현하는 부하 테스트 도구입니다. `RecvAck` 기반 self-throttling 스케줄러로 부하 테스트 도구 자신이 병목이 되지 않도록 설계되었으며, JSON 시나리오 파일만으로 부하 패턴을 코드 변경 없이 조정할 수 있습니다.
+실제 게임 클라이언트와 동일하게 로비 진입 → JWT 인증 → gateway 연결 → RPC 시퀀스 실행이라는 전체 흐름을 다수의 가상 봇으로 부하 테스트 도구입니다. `RecvAck` 기반 self-throttling 스케줄러로 부하 테스트 도구 자신이 병목이 되지 않도록 설계되었으며, JSON 시나리오 파일만으로 부하 패턴을 코드 변경 없이 조정할 수 있습니다.
 
 **핵심 사용처**: 신규 빌드/인프라 변경 전 백엔드 스택 전체(Gateway, Lobby, Player Service)의 동시 접속 처리량 및 병목 검증.
 
@@ -56,9 +56,9 @@ RabbitMQ Management API를 polling하여 매치메이킹 대기열의 크기와 
 
 ![Icarus client, backend, and third-party platform relationship](./architecture/diagram2.png)
 
-클라이언트 관점에서 바라본 상위 레벨 구조입니다. 게임 클라이언트는 두 개의 독립적인 backend 축과 연결됩니다: 하나는 `Icarus Backend`의 `Gateway`(이 저장소의 서비스들이 속한 자체 백엔드), 다른 하나는 Steam/Epic 등 `Third party OnlineSubsystem`을 경유하는 `Third party platform`(Auth, Friends, Messenger, Leaderboards 등 플랫폼 제공 서비스)입니다. `OnlineSubsystemIcarus`(Unreal 클라이언트 플러그인)는 이 두 축을 모두 추상화하여 게임 코드에 노출하며, 이 저장소의 microservice들은 그중 왼쪽 축(`Icarus Backend`)의 서버 측 구현체에 해당합니다.
+클라이언트 관점에서 바라본 상위 레벨 구조입니다. 게임 클라이언트는 두 개의 독립적인 backend 축과 연결됩니다. 하나는 `Icarus Backend`의 `Gateway`(이 저장소의 서비스들이 속한 자체 백엔드), 다른 하나는 Steam/Epic 등 `Third party OnlineSubsystem`을 경유하는 `Third party platform`(Auth, Friends, Messenger, Leaderboards 등 플랫폼 제공 서비스)입니다. `OnlineSubsystemIcarus`(Unreal 클라이언트 플러그인)는 이 두 축을 모두 추상화하여 게임 코드에 노출하며, 이 저장소의 microservice들은 그중 왼쪽 축(`Icarus Backend`)의 서버 측 구현체에 해당합니다.
 
-모든 서비스(`sessionManager`, `playerService`, `adminproxy`, `botclient`, `lobbystats`)는 서로 직접 호출하지 않고 **RabbitMQ를 매개로 한 exchange/queue 바인딩**으로만 결합되어 있어, 개별 배포·재시작·장애가 다른 서비스에 직접적인 컴파일/런타임 의존성을 만들지 않습니다. 서비스 간 공유되는 계약은 exchange 이름 상수와, 클라이언트-서버 양측에 동일하게 구현된 **byte-level wire protocol**(`EventName\nheader:value\n\nBody`) 두 가지로 좁게 유지됩니다. `botclient`는 위 두 다이어그램의 `Gateway` 진입 경로 전체(로비 → 인증 → RPC)를 독립적인 시뮬레이터로 재현하여 부하를 발생시키는 역할을 합니다.
+모든 서비스(`sessionManager`, `playerService`, `adminproxy`, `botclient`, `lobbystats`)는 서로 직접 호출하지 않고 **RabbitMQ를 매개로 한 exchange/queue 바인딩**으로만 결합되어 있어, 개별 배포·재시작·장애가 다른 서비스에 직접적인 컴파일/런타임 의존성을 만들지 않습니다. 서비스 간 공유되는 계약은 exchange 이름 상수와, 클라이언트-서버 양측에 동일하게 구현된 **byte-level wire protocol**(`EventName\nheader:value\n\nBody`) 두 가지로 유지됩니다. `botclient`는 위 두 다이어그램의 `Gateway` 진입 경로 전체(로비 → 인증 → RPC)를 독립적인 시뮬레이터로 재현하여 부하를 발생시키는 역할을 합니다.
 
 ---
 
