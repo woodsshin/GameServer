@@ -2,12 +2,12 @@
 
 Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 모음입니다. 각 프로젝트는 독립된 Repository처럼 구성되어 있으며, 하단 링크에서 세부 구현과 검증 결과를 확인할 수 있습니다.
 
-**GameServerSample**은 Unreal Engine과 무관하게 Claude Code를 활용해 작성한 순수 C++ Game Server 예제이고, **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다.
+**Seedworld**는 Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드와 연동하는 Game Mode/Subsystem 계층입니다. **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다.
 
 | Project | 요약 | Stack |
 |---|---|---|
-| [GameServerSample](./GameServerSample/README.md) | epoll 기반 비동기 Game Server. DB Connection Pool과 Thread 분리 Architecture로 대규모 동시 접속을 처리 | C++, epoll, MySQL, pthread |
 | [UnrealPlugins/OnlineSubsystemIcarus](./UnrealPlugins/OnlineSubsystemIcarus/README.md) | 자체 Game Backend(Icarus)를 UE `OnlineSubsystem` Interface로 연동하는 Native Code Plugin. WebSocket RPC와 STOMP 기반 Lobby Messaging을 직접 구현 | Unreal Engine, C++, WebSocket, STOMP |
+| [Seedworld](./Seedworld/README.md) | Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드와 연동하는 Game Mode/Subsystem 계층 | Unreal Engine, C++, AWS GameLift, gRPC(TurboLink), EOS |
 | [Backend](./Backend/README.md) | Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음. RabbitMQ를 공용 message bus로 사용하는 독립 배포 구조 | Go, RabbitMQ(AMQP/STOMP), Kubernetes, Redis, MySQL |
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README.md) | Epic Online Services를 Unreal Engine의 표준 `OnlineSubsystem` Interface로 wrapping한 Native Code Plugin | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
@@ -16,7 +16,7 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 
 ## 관점 — 왜 이 다섯 프로젝트인가
 
-다섯 프로젝트는 모두 **Client 간 통신 경로를 어떻게 확보할 것인가**라는 동일한 문제를 서로 다른 계층에서 다룹니다.
+다섯 프로젝트는 모두 **Client 간 통신 경로를 어떻게 확보할 것인가**라는 동일한 문제를 서로 다른 계층에서 다룹니다. 그중 OnlineSubsystemIcarus와 Seedworld는 "서버를 어디서, 어떻게 띄울 것인가"라는 같은 질문에 서로 반대되는 답을 내놓는 한 쌍이기도 합니다 — 전자는 Client가 호스트가 되는 P2P, 후자는 AWS GameLift가 Fleet을 Auto-scaling하는 Dedicated Server입니다.
 
 ```
                     ┌─────────────────────────────────────────────────────────┐
@@ -25,42 +25,25 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
                                       │
         ┌─────────────────┬──────────┴──────────┬─────────────────────┐
         ▼                 ▼                     ▼                     ▼
-  Server Infrastructure  Custom Backend    Platform Backend      Network Transport
-  (자체 구현)              Integration      Integration            (NAT Traversal)
-        │             (자체 Protocol)     (Epic Service 통합)          │
-        │              ┌────┴────┐              │                     │
-        ▼              ▼         ▼              ▼                     ▼
-GameServerSample    Backend  OnlineSubsystem OnlineSubsystemEOS   SimpleUPNP
-epoll 비동기 I/O,    Go        Icarus         EOS SDK를 UE         UPnP IGD로 Router에
-DB 연동,            Microservice, WebSocket RPC +  OnlineSubsystem으로  Port Mapping을 자동
-동시성 제어          RabbitMQ    STOMP Lobby      wrapping,           등록, Relay 서버
-                    기반         Client(UE       EOS P2P NAT         없이 P2P 성립
-                    메시지 버스   Plugin)         Traversal 통합
+  Custom Backend      Managed Server        Platform Backend      Network Transport
+  Integration          Scaling               Integration            (NAT Traversal)
+ (자체 Protocol)      (AWS GameLift)        (Epic Service 통합)          │
+   ┌────┴────┐            │                     │                     │
+   ▼         ▼            ▼                     ▼                     ▼
+Backend  OnlineSubsystem  Seedworld        OnlineSubsystemEOS      SimpleUPNP
+Go        Icarus          Dedicated Server  EOS SDK를 UE           UPnP IGD로 Router에
+Microservice, WebSocket RPC +  + GameLift Fleet   OnlineSubsystem으로   Port Mapping을 자동
+RabbitMQ    STOMP Lobby      Auto-scaling,      wrapping,            등록, Relay 서버
+기반         Client(UE       gRPC 매치메이킹     EOS P2P NAT           없이 P2P 성립
+메시지 버스   Plugin)         연동               Traversal 통합
 ```
 
-- **GameServerSample**은 Unreal Engine과 독립된 순수 C++ Standalone Game Server 예제로, Claude Code를 활용해 작성했습니다. Server Side에서 대규모 동시 접속을 어떻게 비동기적으로, 안전하게 처리할지에 대한 답이며, Custom Protocol과 Custom Infrastructure를 직접 설계했습니다.
-- **Backend**와 **OnlineSubsystemIcarus**는 한 쌍의 서버/클라이언트 구현입니다. Backend는 여러 독립 Go microservice를 RabbitMQ 메시지 버스로 결합한 서버 측이고, OnlineSubsystemIcarus는 그 Backend와 WebSocket(자체 프레임 Protocol) + STOMP Lobby Messaging으로 통신하는, Unreal Engine Dedicated Server/Client에 탑재되는 Plugin입니다. Wire Protocol을 서버·클라이언트 양쪽에 직접 설계·구현했다는 점에서, 표준 Platform SDK에 의존하지 않는 완전한 Custom Backend 통합 사례입니다.
+- **Backend**와 **OnlineSubsystemIcarus**는 한 쌍의 서버/클라이언트 구현입니다. Backend는 여러 독립 Go microservice를 RabbitMQ 메시지 버스로 결합한 서버 측이고, OnlineSubsystemIcarus는 그 Backend와 WebSocket(자체 프레임 Protocol) + STOMP Lobby Messaging으로 통신하는, Unreal Engine Dedicated Server/Client에 탑재되는 Plugin입니다. Wire Protocol을 서버·클라이언트 양쪽에 직접 설계·구현했다는 점에서, 표준 Platform SDK에 의존하지 않는 완전한 Custom Backend 통합 사례이며, Client가 곧 서버 역할을 겸하는 **P2P Hosting** 구조입니다.
+- **Seedworld는 Dedicated Server, Icarus는 P2P 호스팅 모델입니다.** Seedworld는 Unreal Engine Dedicated Server를 AWS GameLift Fleet으로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드(TurboLink)로 서버 등록·플레이어 매칭을 처리합니다. Client가 호스트가 되는 대신, GameLift가 Region별 Fleet 용량을 관리하며 필요에 따라 서버 프로세스를 늘리거나 줄이는 **Managed Dedicated Server** 구조입니다.
 - **OnlineSubsystemEOS**는 Unreal Engine Dedicated Server/Client에 탑재되어, Unreal Engine 생태계 안에서 Epic의 Backend Service(인증, Session, matchmaking, P2P)를 엔진 표준 Interface로 통합하는 Middleware Layer입니다. EOS 자체의 P2P NAT Traversal과 Relay Fallback을 활용합니다.
 - **SimpleUPNP**는 Unreal Engine Client와 Dedicated Server 양쪽에서 모두 사용 가능한 Plugin으로, Backend Service 없이 순수 Protocol(UPnP)만으로 실행 중인 PC의 Router에 직접 Port를 열어, Relay Server 없는 완전한 P2P 경로를 확보하는 더 근본적인(low-level) 해법입니다.
 
-다섯 프로젝트를 통해 Custom Server Infrastructure 설계 역량, 분산 Backend Service 및 그에 대응하는 Client-side Protocol 구현 역량, Game Engine Middleware/Network Protocol Level의 문제 해결 역량을 함께 보이는 것을 목표로 했습니다.
-
----
-
-## GameServerSample
-
-Unreal Engine과 무관하게 Claude Code를 활용해 작성한 순수 C++ Standalone Game Server 예제입니다. epoll 기반 비동기 I/O, DB Connection Pool, Thread 분리 Architecture로 구현했으며, 계정 생성, 로그인, Chat Broadcast, 대규모 동시 접속 처리를 지원합니다.
-
-**핵심 설계**
-- **Accept Thread / IoWorker Thread 분리**: Accept 전용 Thread가 신규 연결을 전담하고, 각 IoWorker는 독립된 epoll Instance를 보유해 CPU Core 수에 비례한 수평 확장이 가능합니다.
-- **DB 비동기 처리**: Blocking 방식의 MySQL Query를 IoWorker Thread에서 직접 호출하면 Head-of-Line Blocking이 발생하므로, DBTask를 Queue에 Enqueue하고 별도의 DB Worker Pool이 처리하는 Pipeline을 구성했습니다.
-- **길이 기반 Binary Protocol**: `[4B TotalSize][2B PacketType][Body]` 구조로 TCP Stream의 부분 수신/결합 수신을 처리합니다.
-- **동시성 제어**: `shared_mutex`로 읽기 위주 연산(Broadcast)의 동시 진입을 허용하고, Snapshot 후 즉시 Lock을 해제하는 패턴으로 Lock 보유 시간을 최소화했습니다.
-- **보안**: salt + SHA-256 Stretching(10,000 round) 기반 비밀번호 해싱, Prepared Statement로 SQL Injection 차단.
-
-**실측 검증**: 자체 제작 비동기 Load Test 도구로 최대 1,000명 동시 접속을 실측했습니다. 접속·Broadcast 계층은 병목 없이 100% 성공률을 유지했으나, 회원가입/로그인 처리량이 27.5 req/sec로 고정되는 현상을 발견하고 원인이 SHA-256 Stretching에 따른 CPU 포화임을 대조군 테스트로 교차 검증했습니다(Stretching Round 축소 시 성공률 92.3% → 100%, 지연 p50 약 14배 개선). 방법론과 전체 수치는 하위 [`report/README.md`](./GameServerSample/report/README.md)에 정리되어 있습니다.
-
-→ 자세한 내용은 [GameServerSample/README.md](./GameServerSample/README.md) 참고.
+다섯 프로젝트를 통해 P2P/Dedicated Server 양쪽 모델에 대한 이해, 분산 Backend Service 및 그에 대응하는 Client-side Protocol 구현 역량, Game Engine Middleware/Network Protocol Level의 문제 해결 역량을 함께 보이는 것을 목표로 했습니다.
 
 ---
 
@@ -101,6 +84,20 @@ Backend가 서버 측 RabbitMQ Microservice 군이라면, OnlineSubsystemIcarus�
 
 ---
 
+## Seedworld
+
+Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드(TurboLink)와 연동하는 Game Mode/Subsystem 계층입니다. OnlineSubsystemIcarus가 Client 호스팅 기반 P2P 모델이라면, Seedworld는 GameLift가 Region별 Fleet 용량을 관리하는 Managed Dedicated Server 모델로, 같은 "서버를 어떻게 띄울 것인가"라는 문제에 대한 반대편 해법입니다.
+
+**핵심 설계**
+- **서비스 디스커버리 & 토큰 관리**: 클라이언트/서버 각각의 gRPC Subsystem이 부팅 시 HTTP로 엔드포인트를 조회하고, 요청받은 서비스를 지연 커넥트하는 큐잉 구조를 갖습니다. 데디케이티드 서버는 OAuth Client-Credentials로 인증하며, 만료 60초 전 자동 토큰 갱신을 예약합니다.
+- **비동기 gRPC 콜백 프록시**: `UBlueprintAsyncActionBase` 패턴을 따르는 프록시 오브젝트로 매치메이킹/세션 생성 RPC를 `OnSuccess`/`OnFail` 델리게이트로 감쌉니다. `WITH_EDITOR` 빌드에서는 실제 백엔드 호출 없이 즉시 실패를 반환해 PIE 테스트 시 네트워크 의존성을 차단합니다.
+- **GameLift Fleet 오케스트레이션**: 데디케이티드 서버 부팅 시 자체 매치메이킹 백엔드에 서버 등록을 폴링하고, GameLift SDK로 발급된 PlayerSessionId를 `PreLogin`에서 검증합니다. GameLift의 `StartGameSession` 요청이 SDK 초기화보다 먼저 도착하는 레이스 컨디션은 pending 플래그로 흡수합니다.
+- **리플리케이션 기반 팀 시스템**: 팀 생성/초대/역할 변경을 Server RPC로만 처리하고, `GameStateBase`를 팀 상태의 단일 진실 공급원으로 두어 `OnRep_*`을 통해 클라이언트에 결과만 전파합니다.
+
+→ 자세한 내용은 [Seedworld/README.md](./Seedworld/README.md) 참고.
+
+---
+
 ## UnrealPlugins/OnlineSubsystemEOS
 
 Unreal Engine Dedicated Server와 Client 양쪽에 탑재되어 동작하는 Native Code Plugin으로, Epic Online Services(EOS)를 UE의 표준 `OnlineSubsystem` Interface로 wrapping합니다. `DefaultPlatformService=EOS` 설정 하나로 기존에 다른 Platform을 대상으로 구현된 온라인 로직(로그인, Session/matchmaking, 업적, 친구 등)을 코드 수정 없이 EOS로 교체할 수 있습니다.
@@ -136,12 +133,6 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 ```
 .
 ├── README.md                                   (본 문서)
-├── GameServerSample/
-│   ├── README.md
-│   ├── include/ src/ sql/ tools/
-│   ├── report/
-│   │   └── README.txt
-│   └── CMakeLists.txt
 ├── Backend/
 │   ├── README_backend.md
 │   ├── architecture/
@@ -155,6 +146,15 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 │   │   └── README.md
 │   └── sessionmanager/
 │       └── README.md
+├── Seedworld/
+│   ├── README.md
+│   └── Source/
+│       ├── CallbackProxy/     (매치메이킹/세션 gRPC 콜백 프록시)
+│       ├── DedicatedServer/   (SeedworldDSGrpcSubsystem 등 DS 전용 서브시스템)
+│       ├── Game/              (SeedworldGrpcSubsystem 등 Client 전용 서브시스템)
+│       ├── GameFramework/     (GameMode/GameState/PlayerState/PlayerController, HUD)
+│       ├── GameLift/          (GameLift SDK 연동 서브시스템/서버 오브젝트)
+│       └── SubSystem/         (팀 시스템, 헬퍼 서브시스템)
 └── UnrealPlugins/
     ├── OnlineSubsystemEOS/
     │   ├── README.md
