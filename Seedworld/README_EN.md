@@ -15,7 +15,7 @@ This README compiles a selection of core code samples from the online/multiplaye
    - [GameLift Game Mode — Dedicated Server Session Orchestration](#3-gamelift-game-mode--dedicated-server-session-orchestration)
    - [GameLift Server Object — SDK Wrapping & Session State Management](#4-gamelift-server-object--sdk-wrapping--session-state-management)
    - [Online Game Mode — Session Create/Update](#5-online-game-mode--session-createupdate)
-   - [BTK Team System — Replication-Based Team Management](#6-btk-team-system--replication-based-team-management)
+   - [BTK Team System — Replication-Based In-Game Team Management](#6-btk-team-system--replication-based-in-game-team-management)
 3. [Design Highlights](#design-highlights)
 
 ---
@@ -341,11 +341,11 @@ The public IP is fetched by a dedicated proxy (`UGetPublicIPCallbackProxy`) call
 
 ---
 
-### 6. BTK Team System — Replication-Based Team Management
+### 6. BTK Team System — Replication-Based In-Game Team Management
 
-**Files**: `SeedworldBTKGameStateBase.cpp`, `SeedworldBTKPlayerState.cpp`, `SeedworldBTKTeamSubsystem.cpp`
+**Files**: `SeedworldBTKGameStateBase.cpp`, `SeedworldBTKPlayerState.cpp`, `SeedworldBTKTeamSubsystem.cpp`, `BTKTeam.cpp`
 
-A server-authoritative (Server RPC) system for team creation, invitations, and role management. `GameStateBase` acts as the source of truth for the team array (`BTKTeams`); `PlayerState` replicates its own team reference; and a local client subsystem (`USeedworldBTKTeamSubsystem`) broadcasts events to the UI.
+A server-authoritative (Server RPC) system for team creation, invitations, and role management. `GameStateBase` acts as the authoritative state for the team array (`BTKTeams`), and each team is spawned as its own replicated `ABTKTeam` Actor that owns its member list, roles, invitations, and team chat. `PlayerState` replicates its own team reference, and a local client subsystem (`USeedworldBTKTeamSubsystem`) broadcasts events to the UI.
 
 **Server: validating a team-creation request (checks for existing membership/duplicate name before spawning):**
 
@@ -374,6 +374,140 @@ void ASeedworldBTKGameStateBase::Server_CreateNewTeam_Implementation(const FStri
     ForceNetUpdate();
 
     BTKPlayerController->Client_CreateTeamResult(EBTKTeamResult::OK, NewBTKTeam);
+}
+```
+
+**Team Actor: invitation → acceptance flow** (checks Captain/Lieutenant permission, guards against existing membership and duplicate invites, then adds to `PendingMembers`):
+
+```cpp
+void ABTKTeam::SendInvitation(APlayerState* NewMember, APlayerState* Requester)
+{
+    ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester);
+    if (RequesterState->GetTeamRole() != EBTKTeamRole::Captain && RequesterState->GetTeamRole() != EBTKTeamRole::Lieutenant)
+    {
+        UE_LOG(SeedworldBTKTeamLog, Warning, TEXT("ABTKTeam::SendInvitation : Not allowed requester : Team role %d"), RequesterState->GetTeamRole());
+        return;
+    }
+
+    if (FindMember(NewMember) || FindPendingMember(NewMember))
+    {
+        return; // already a member, or an invitation is already pending
+    }
+
+    FBTKTeamMemberInfo NewMemberInfo;
+    NewMemberInfo.UniqueIDString = NewMember->GetUniqueId()->ToString();
+    NewMemberInfo.TeamRole = EBTKTeamRole::Member;
+    NewMemberInfo.PlayerName = NewMember->GetPlayerName();
+    PendingMembers.Add(NewMemberInfo);
+    OnRep_PendingMembers();
+}
+
+EBTKTeamResult ABTKTeam::AcceptTeamInvitation(const FString& UniqueIDString)
+{
+    if (!HasAuthority()) return EBTKTeamResult::No_Authority;
+
+    FBTKTeamMemberInfo* MemberInfo = FindPendingMemberByUniqueID(UniqueIDString);
+    if (!MemberInfo) return EBTKTeamResult::Not_Found_Player;
+
+    MemberInfo->Status = EBTKPlayerStatus::Online;
+    Members.Add(*MemberInfo); // promote from pending to full member
+
+    const int32 NewCount = Algo::RemoveIf(PendingMembers, [&](const FBTKTeamMemberInfo& Info)
+    {
+        return Info.UniqueIDString.Equals(UniqueIDString);
+    });
+    PendingMembers.SetNum(NewCount);
+    OnRep_PendingMembers();
+
+    return EBTKTeamResult::OK;
+}
+```
+
+**Team Actor: kicking a member & transferring captaincy** (kicking clears the team reference on the target's `PlayerState`; captaincy transfer must be initiated by the current Captain, who is automatically demoted to Lieutenant):
+
+```cpp
+void ABTKTeam::KickMemberByUniqueId(const FString& KickUniqueIDString, APlayerState* Requester)
+{
+    ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester);
+    if (RequesterState->GetTeamRole() != EBTKTeamRole::Captain && RequesterState->GetTeamRole() != EBTKTeamRole::Lieutenant)
+    {
+        return; // only Captain/Lieutenant can kick
+    }
+
+    const int32 NewCount = Algo::RemoveIf(Members, [&](const FBTKTeamMemberInfo& MemberInfo)
+    {
+        return MemberInfo.UniqueIDString.Equals(KickUniqueIDString);
+    });
+    Members.SetNum(NewCount);
+    OnRep_Members();
+    ForceNetUpdate();
+
+    // clear the team reference on the kicked player's PlayerState (found by scanning PlayerArray)
+    for (APlayerState* KickPlayerState : GetWorld()->GetGameState<ASeedworldBTKGameStateBase>()->PlayerArray)
+    {
+        if (KickPlayerState && KickPlayerState->GetUniqueId().IsValid() &&
+            KickPlayerState->GetUniqueId()->ToString().Equals(KickUniqueIDString))
+        {
+            if (ASeedworldBTKPlayerState* BTKPlayerState = Cast<ASeedworldBTKPlayerState>(KickPlayerState))
+            {
+                BTKPlayerState->SetTeam(nullptr);
+            }
+            break;
+        }
+    }
+}
+
+void ABTKTeam::SetRoleByUniqueId(const FString& UniqueIDString, EBTKTeamRole NewRole, APlayerState* Requester)
+{
+    ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester);
+    if (RequesterState->GetTeamRole() != EBTKTeamRole::Captain) return; // only Captain can change roles
+
+    FBTKTeamMemberInfo* MemberInfo = FindMemberByUniqueID(UniqueIDString);
+    if (!MemberInfo) return;
+    MemberInfo->TeamRole = NewRole;
+    // ... the same role is mirrored onto the target's PlayerState ...
+
+    // when captaincy is transferred, the requester is automatically demoted to Lieutenant
+    if (NewRole == EBTKTeamRole::Captain)
+    {
+        FBTKTeamMemberInfo* RequesterMemberInfo = FindMemberByUniqueID(RequesterState->GetUniqueId()->ToString());
+        if (RequesterMemberInfo)
+        {
+            RequesterMemberInfo->TeamRole = EBTKTeamRole::Lieutenant;
+            RequesterState->SetTeamRole(EBTKTeamRole::Lieutenant);
+        }
+    }
+    OnRep_Members();
+    ForceNetUpdate();
+}
+```
+
+**Team Actor: team chat** (validates membership before appending a message; deletion is Captain-only):
+
+```cpp
+void ABTKTeam::SendTeamChatMessage(const FString& Message, APlayerState* Requester)
+{
+    if (!FindMember(Requester) || Message.IsEmpty()) return; // only team members can chat
+
+    FBTKTeamChatMessage ChatMessage;
+    ChatMessage.ChatIndex = ++NextChatIndex;
+    ChatMessage.Message = Message;
+    ChatMessage.SenderName = Requester->GetPlayerName();
+    ChatMessage.Timestamp = FDateTime::UtcNow();
+    ChatMessages.AddMessage(ChatMessage);
+    OnRep_ChatMessages(); // reflect the new message in the client UI
+}
+
+void ABTKTeam::DeleteChatMessage(int32 MessageIndex, APlayerState* Requester)
+{
+    if (ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester))
+    {
+        if (RequesterState->GetTeamRole() == EBTKTeamRole::Captain && ChatMessages.Messages.IsValidIndex(MessageIndex))
+        {
+            ChatMessages.RemoveMessage(MessageIndex);
+            OnRep_ChatMessages();
+        }
+    }
 }
 ```
 
@@ -435,6 +569,7 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 | **Race-condition guard** | If GameLift's `StartGameSession` arrives before SDK init completes, a pending flag absorbs it and replays it later |
 | **Retry strategy** | Failed matchmaking/session-creation calls auto-retry via timer-based polling (at `MatchMakingDSWaitingTime` intervals) |
 | **Network authority separation** | The team system mutates state only through Server RPCs; clients reflect the result via `OnRep_*` — a local-player check avoids unnecessary broadcasts |
+| **In-game team management** | Each team is spawned as its own replicated `Actor` (`ABTKTeam`), owning invitations/acceptance, kicking, captaincy transfer (with automatic Captain→Lieutenant demotion), and team chat (send/delete) — role-based permissions (Captain/Lieutenant/Member) are validated on every request |
 | **Resource cleanup** | Every callback proxy explicitly clears its delegates in `BeginDestroy()` to prevent dangling bindings |
 
 ---

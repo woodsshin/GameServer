@@ -15,7 +15,7 @@
    - [GameLift 게임모드 — 데디케이티드 서버 세션 오케스트레이션](#3-gamelift-게임모드--데디케이티드-서버-세션-오케스트레이션)
    - [GameLift 서버 오브젝트 — SDK 래핑 및 세션 상태 관리](#4-gamelift-서버-오브젝트--sdk-래핑-및-세션-상태-관리)
    - [온라인 게임모드 — 세션 생성/갱신](#5-온라인-게임모드--세션-생성갱신)
-   - [BTK 팀 시스템 — 리플리케이션 기반 팀 관리](#6-btk-팀-시스템--리플리케이션-기반-팀-관리)
+   - [BTK 팀 시스템 — 리플리케이션 기반 인게임 팀 관리](#6-btk-팀-시스템--리플리케이션-기반-인게임-팀-관리)
 3. [설계 포인트 요약](#설계-포인트-요약)
 
 ---
@@ -341,11 +341,11 @@ void ASeedworldOnlineGameModeBase::InitGameServer()
 
 ---
 
-### 6. BTK 팀 시스템 — 리플리케이션 기반 팀 관리
+### 6. BTK 팀 시스템 — 리플리케이션 기반 인게임 팀 관리
 
-**파일**: `SeedworldBTKGameStateBase.cpp`, `SeedworldBTKPlayerState.cpp`, `SeedworldBTKTeamSubsystem.cpp`
+**파일**: `SeedworldBTKGameStateBase.cpp`, `SeedworldBTKPlayerState.cpp`, `SeedworldBTKTeamSubsystem.cpp`, `BTKTeam.cpp`
 
-서버 권한(Server RPC) 기반 팀 생성/초대/역할 관리 시스템. `GameStateBase`가 팀 배열(`BTKTeams`)의 진실 공급원(source of truth) 역할을 하고, `PlayerState`는 자신의 팀 참조를 리플리케이트하며, 로컬 클라이언트 서브시스템(`USeedworldBTKTeamSubsystem`)이 UI에 이벤트를 브로드캐스트합니다.
+서버 권한(Server RPC) 기반 팀 생성/초대/역할 관리 시스템. `GameStateBase`가 팀 배열(`BTKTeams`)의 기준 데이터(source of truth) 역할을 하고, 팀 하나하나는 리플리케이트되는 `ABTKTeam` Actor로 스폰되어 멤버 목록·역할·초대·팀 채팅을 자체적으로 소유합니다. `PlayerState`는 자신의 팀 참조를 리플리케이트하며, 로컬 클라이언트 서브시스템(`USeedworldBTKTeamSubsystem`)이 UI에 이벤트를 브로드캐스트합니다.
 
 **서버: 팀 생성 요청 검증 (중복 소속/중복 이름 체크 후 스폰):**
 
@@ -374,6 +374,140 @@ void ASeedworldBTKGameStateBase::Server_CreateNewTeam_Implementation(const FStri
     ForceNetUpdate();
 
     BTKPlayerController->Client_CreateTeamResult(EBTKTeamResult::OK, NewBTKTeam);
+}
+```
+
+**팀 Actor: 초대 발송 → 수락 흐름** (Captain/Lieutenant 권한 체크, 기존 멤버·중복 초대 방지 후 `PendingMembers`에 추가):
+
+```cpp
+void ABTKTeam::SendInvitation(APlayerState* NewMember, APlayerState* Requester)
+{
+    ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester);
+    if (RequesterState->GetTeamRole() != EBTKTeamRole::Captain && RequesterState->GetTeamRole() != EBTKTeamRole::Lieutenant)
+    {
+        UE_LOG(SeedworldBTKTeamLog, Warning, TEXT("ABTKTeam::SendInvitation : Not allowed requester : Team role %d"), RequesterState->GetTeamRole());
+        return;
+    }
+
+    if (FindMember(NewMember) || FindPendingMember(NewMember))
+    {
+        return; // 이미 멤버이거나 초대가 대기 중
+    }
+
+    FBTKTeamMemberInfo NewMemberInfo;
+    NewMemberInfo.UniqueIDString = NewMember->GetUniqueId()->ToString();
+    NewMemberInfo.TeamRole = EBTKTeamRole::Member;
+    NewMemberInfo.PlayerName = NewMember->GetPlayerName();
+    PendingMembers.Add(NewMemberInfo);
+    OnRep_PendingMembers();
+}
+
+EBTKTeamResult ABTKTeam::AcceptTeamInvitation(const FString& UniqueIDString)
+{
+    if (!HasAuthority()) return EBTKTeamResult::No_Authority;
+
+    FBTKTeamMemberInfo* MemberInfo = FindPendingMemberByUniqueID(UniqueIDString);
+    if (!MemberInfo) return EBTKTeamResult::Not_Found_Player;
+
+    MemberInfo->Status = EBTKPlayerStatus::Online;
+    Members.Add(*MemberInfo); // Pending → 정식 멤버로 승격
+
+    const int32 NewCount = Algo::RemoveIf(PendingMembers, [&](const FBTKTeamMemberInfo& Info)
+    {
+        return Info.UniqueIDString.Equals(UniqueIDString);
+    });
+    PendingMembers.SetNum(NewCount);
+    OnRep_PendingMembers();
+
+    return EBTKTeamResult::OK;
+}
+```
+
+**팀 Actor: 강퇴 & 팀장 위임** (강퇴 시 대상의 `PlayerState`에서 팀 참조를 해제하고, 팀장 위임은 반드시 현재 Captain이 시작해야 하며 자신은 자동으로 Lieutenant로 강등):
+
+```cpp
+void ABTKTeam::KickMemberByUniqueId(const FString& KickUniqueIDString, APlayerState* Requester)
+{
+    ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester);
+    if (RequesterState->GetTeamRole() != EBTKTeamRole::Captain && RequesterState->GetTeamRole() != EBTKTeamRole::Lieutenant)
+    {
+        return; // Captain/Lieutenant만 강퇴 가능
+    }
+
+    const int32 NewCount = Algo::RemoveIf(Members, [&](const FBTKTeamMemberInfo& MemberInfo)
+    {
+        return MemberInfo.UniqueIDString.Equals(KickUniqueIDString);
+    });
+    Members.SetNum(NewCount);
+    OnRep_Members();
+    ForceNetUpdate();
+
+    // 강퇴 대상의 PlayerState에서 팀 참조 해제 (PlayerArray 순회로 대상 탐색)
+    for (APlayerState* KickPlayerState : GetWorld()->GetGameState<ASeedworldBTKGameStateBase>()->PlayerArray)
+    {
+        if (KickPlayerState && KickPlayerState->GetUniqueId().IsValid() &&
+            KickPlayerState->GetUniqueId()->ToString().Equals(KickUniqueIDString))
+        {
+            if (ASeedworldBTKPlayerState* BTKPlayerState = Cast<ASeedworldBTKPlayerState>(KickPlayerState))
+            {
+                BTKPlayerState->SetTeam(nullptr);
+            }
+            break;
+        }
+    }
+}
+
+void ABTKTeam::SetRoleByUniqueId(const FString& UniqueIDString, EBTKTeamRole NewRole, APlayerState* Requester)
+{
+    ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester);
+    if (RequesterState->GetTeamRole() != EBTKTeamRole::Captain) return; // 역할 변경은 Captain 전용
+
+    FBTKTeamMemberInfo* MemberInfo = FindMemberByUniqueID(UniqueIDString);
+    if (!MemberInfo) return;
+    MemberInfo->TeamRole = NewRole;
+    // ... 대상 PlayerState에도 동일 역할 반영 ...
+
+    // 팀장 위임 시, 위임한 본인은 자동으로 Lieutenant로 강등
+    if (NewRole == EBTKTeamRole::Captain)
+    {
+        FBTKTeamMemberInfo* RequesterMemberInfo = FindMemberByUniqueID(RequesterState->GetUniqueId()->ToString());
+        if (RequesterMemberInfo)
+        {
+            RequesterMemberInfo->TeamRole = EBTKTeamRole::Lieutenant;
+            RequesterState->SetTeamRole(EBTKTeamRole::Lieutenant);
+        }
+    }
+    OnRep_Members();
+    ForceNetUpdate();
+}
+```
+
+**팀 Actor: 팀 채팅** (멤버십 검증 후 메시지 추가, 삭제는 Captain 전용):
+
+```cpp
+void ABTKTeam::SendTeamChatMessage(const FString& Message, APlayerState* Requester)
+{
+    if (!FindMember(Requester) || Message.IsEmpty()) return; // 팀원만 채팅 가능
+
+    FBTKTeamChatMessage ChatMessage;
+    ChatMessage.ChatIndex = ++NextChatIndex;
+    ChatMessage.Message = Message;
+    ChatMessage.SenderName = Requester->GetPlayerName();
+    ChatMessage.Timestamp = FDateTime::UtcNow();
+    ChatMessages.AddMessage(ChatMessage);
+    OnRep_ChatMessages(); // 클라이언트 UI에 새 메시지 반영
+}
+
+void ABTKTeam::DeleteChatMessage(int32 MessageIndex, APlayerState* Requester)
+{
+    if (ASeedworldBTKPlayerState* RequesterState = Cast<ASeedworldBTKPlayerState>(Requester))
+    {
+        if (RequesterState->GetTeamRole() == EBTKTeamRole::Captain && ChatMessages.Messages.IsValidIndex(MessageIndex))
+        {
+            ChatMessages.RemoveMessage(MessageIndex);
+            OnRep_ChatMessages();
+        }
+    }
 }
 ```
 
@@ -435,6 +569,7 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 | **레이스 컨디션 방어** | GameLift `StartGameSession`이 SDK 초기화보다 먼저 오는 경우 pending 플래그로 흡수 후 재생 |
 | **재시도 전략** | 매치메이킹/세션 생성 실패 시 타이머 기반 폴링으로 자동 재시도 (`MatchMakingDSWaitingTime` 간격) |
 | **네트워크 권한 분리** | 팀 시스템은 Server RPC로만 상태를 변경하고, `OnRep_*`를 통해 클라이언트가 결과만 반영 — 로컬 플레이어 여부 체크로 불필요한 브로드캐스트 방지 |
+| **인게임 팀 관리** | 팀 하나하나가 리플리케이트 `Actor`(`ABTKTeam`)로 스폰되어 초대/수락, 강퇴, Captain→Lieutenant 자동 강등을 동반한 팀장 위임, 팀 채팅(전송/삭제)까지 자체 소유 — 역할별 권한(Captain/Lieutenant/Member)을 각 요청마다 검증 |
 | **리소스 정리** | 모든 콜백 프록시가 `BeginDestroy()`에서 델리게이트를 명시적으로 해제해 댕글링 바인딩 방지 |
 
 ---
