@@ -16,6 +16,7 @@
    - [GameLift 서버 오브젝트 — SDK 래핑 및 세션 상태 관리](#4-gamelift-서버-오브젝트--sdk-래핑-및-세션-상태-관리)
    - [온라인 게임모드 — 세션 생성/갱신](#5-온라인-게임모드--세션-생성갱신)
    - [BTK 팀 시스템 — 리플리케이션 기반 인게임 팀 관리](#6-btk-팀-시스템--리플리케이션-기반-인게임-팀-관리)
+   - [커스텀 Replication Graph — 클래스별 노드 라우팅](#7-커스텀-replication-graph--클래스별-노드-라우팅)
 3. [설계 포인트 요약](#설계-포인트-요약)
 
 ---
@@ -558,6 +559,107 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 
 ---
 
+### 7. 커스텀 Replication Graph — 클래스별 노드 라우팅
+
+**파일**: `SeedworldReplicationGraph.h`, `SeedworldReplicationGraph.cpp`
+
+기본 `UReplicationGraph`를 상속해, 액터 클래스별로 리플리케이션 노드를 명시적으로 라우팅하는 서브클래스. 클래스 → 노드 매핑을 `enum` 기반 룩업 테이블(`ClassRoutingMap`)로 캐싱해두고, Add/Remove 시점에 해당 매핑을 조회해 알맞은 노드로 위임하는 구조입니다.
+
+```cpp
+UENUM()
+enum class ESeedworldRepGraphClassNodeMapping : uint8
+{
+    NotRouted,              // 미등록 클래스 — 라우팅되지 않으면 리플리케이트되지 않음
+    AlwaysRelevant,         // 공간 개념 없이 전체 커넥션에 상시 전파
+    Spatialized_Dynamic,    // 그리드 노드, 매 프레임 위치 갱신 대상
+    Spatialized_Static,     // 그리드 노드, 배치 후 이동 없는 고정 액터
+    Spatialized_Dormant,    // 그리드 노드 + Dormancy, 현재 등록된 클래스 없음(예약)
+};
+```
+
+**클래스별 라우팅 등록 — `bAlwaysRelevant` 액터는 Non-spatial 노드로, Pawn은 Cull Distance 기반 Dynamic 그리드로:**
+
+```cpp
+void USeedworldReplicationGraph::InitGlobalActorClassSettings()
+{
+    Super::InitGlobalActorClassSettings();
+    ClassRoutingMap.Reset();
+
+    // ABTKTeam: bAlwaysRelevant = true, 공간적 의미 없음 → Non-spatial 상시 전파 노드
+    ClassRoutingMap.Add(ABTKTeam::StaticClass(), ESeedworldRepGraphClassNodeMapping::AlwaysRelevant);
+    GlobalActorReplicationInfoMap.SetClassInfo(ABTKTeam::StaticClass(), FClassReplicationInfo());
+
+    // ASeedworldCharacter_BTK(Pawn): 지속적으로 이동 → Spatialized_Dynamic
+    ClassRoutingMap.Add(ASeedworldCharacter_BTK::StaticClass(), ESeedworldRepGraphClassNodeMapping::Spatialized_Dynamic);
+    const ASeedworldCharacter_BTK* CDO = GetDefault<ASeedworldCharacter_BTK>();
+
+    FClassReplicationInfo ClassInfo;
+    ClassInfo.ReplicationPeriodFrame = GetReplicationPeriodFrameForFrequency(CDO->GetNetUpdateFrequency());
+    if (CDO->bAlwaysRelevant || CDO->bOnlyRelevantToOwner)
+    {
+        ClassInfo.SetCullDistanceSquared(0.f); // 상시 관련 액터는 Cull 거리 무효화
+    }
+    else
+    {
+        ClassInfo.SetCullDistanceSquared(CDO->GetNetCullDistanceSquared());
+    }
+    GlobalActorReplicationInfoMap.SetClassInfo(ASeedworldCharacter_BTK::StaticClass(), ClassInfo);
+
+    // ASeedworldDebugTeleportPoint: 배치 후 고정 → Spatialized_Static
+    ClassRoutingMap.Add(ASeedworldDebugTeleportPoint::StaticClass(), ESeedworldRepGraphClassNodeMapping::Spatialized_Static);
+    GlobalActorReplicationInfoMap.SetClassInfo(ASeedworldDebugTeleportPoint::StaticClass(), FClassReplicationInfo());
+}
+```
+
+**Add/Remove 라우팅 — 매핑값에 따라 `AlwaysRelevantNode` 또는 `GridNode`(Dynamic/Static)로 위임, 미등록 클래스는 침묵 실패 대신 경고 로그:**
+
+```cpp
+void USeedworldReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo, FGlobalActorReplicationInfo& GlobalInfo)
+{
+    const ESeedworldRepGraphClassNodeMapping Mapping = GetClassNodeMapping(ActorInfo.Actor->GetClass());
+
+    switch (Mapping)
+    {
+    case ESeedworldRepGraphClassNodeMapping::AlwaysRelevant:
+        AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
+        break;
+    case ESeedworldRepGraphClassNodeMapping::Spatialized_Dynamic:
+        GridNode->AddActor_Dynamic(ActorInfo, GlobalInfo);
+        break;
+    case ESeedworldRepGraphClassNodeMapping::Spatialized_Static:
+        GridNode->AddActor_Static(ActorInfo, GlobalInfo);
+        break;
+    case ESeedworldRepGraphClassNodeMapping::NotRouted:
+    default:
+        // 노드에 추가되지 않은 액터는 리플리케이트되지 않는 것을 기록
+        UE_LOG(SeedworldRepGraphLog, Warning,
+            TEXT("%s (class %s) has no registered routing and will NOT replicate. Add it to InitGlobalActorClassSettings."),
+            *ActorInfo.Actor->GetName(), *ActorInfo.Actor->GetClass()->GetName());
+        break;
+    }
+}
+```
+
+**상속 계층을 따라 매핑을 탐색 — 서브클래스가 별도 등록 없이도 부모의 라우팅을 그대로 상속받도록 설계:**
+
+```cpp
+ESeedworldRepGraphClassNodeMapping USeedworldReplicationGraph::GetClassNodeMapping(UClass* Class) const
+{
+    for (UClass* CurrentClass = Class; CurrentClass; CurrentClass = CurrentClass->GetSuperClass())
+    {
+        if (const ESeedworldRepGraphClassNodeMapping* Found = ClassRoutingMap.Find(CurrentClass))
+        {
+            return *Found;
+        }
+    }
+    return ESeedworldRepGraphClassNodeMapping::NotRouted;
+}
+```
+
+`PlayerState`/`PlayerController`는 별도 클래스 등록 없이, 엔진의 커넥션별 `AlwaysRelevantForConnection` 경로(`USeedworldReplicationGraphNode_AlwaysRelevantForConnection`)로 커버됩니다 — 소유 커넥션에만 상시 전파되는 오너 전용 리플리케이션이므로 글로벌 그리드/상시-전파 노드와는 별개 트랙으로 분리한 설계입니다.
+
+---
+
 ## 설계 포인트 요약
 
 | 영역 | 설계 포인트 |
@@ -571,6 +673,7 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 | **네트워크 권한 분리** | 팀 시스템은 Server RPC로만 상태를 변경하고, `OnRep_*`를 통해 클라이언트가 결과만 반영 — 로컬 플레이어 여부 체크로 불필요한 브로드캐스트 방지 |
 | **인게임 팀 관리** | 팀 하나하나가 리플리케이트 `Actor`(`ABTKTeam`)로 스폰되어 초대/수락, 강퇴, Captain→Lieutenant 자동 강등을 동반한 팀장 위임, 팀 채팅(전송/삭제)까지 자체 소유 — 역할별 권한(Captain/Lieutenant/Member)을 각 요청마다 검증 |
 | **리소스 정리** | 모든 콜백 프록시가 `BeginDestroy()`에서 델리게이트를 명시적으로 해제해 댕글링 바인딩 방지 |
+| **Replication Graph 라우팅** | 클래스 → 노드 매핑을 `enum` 룩업 테이블로 캐싱, 상속 계층을 타고 올라가며 탐색해 서브클래스가 자동으로 부모 라우팅 상속 — 미등록 클래스는 경고 로그로 노출 |
 
 ---
 

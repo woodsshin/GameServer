@@ -93,6 +93,7 @@ Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRP
 - **비동기 gRPC 콜백 프록시**: `UBlueprintAsyncActionBase` 패턴을 따르는 프록시 오브젝트로 매치메이킹/세션 생성 RPC를 `OnSuccess`/`OnFail` 델리게이트로 감쌉니다. `WITH_EDITOR` 빌드에서는 실제 백엔드 호출 없이 즉시 실패를 반환해 PIE 테스트 시 네트워크 의존성을 차단합니다.
 - **GameLift Fleet 오케스트레이션**: 데디케이티드 서버 부팅 시 자체 매치메이킹 백엔드에 서버 등록을 폴링하고, GameLift SDK로 발급된 PlayerSessionId를 `PreLogin`에서 검증합니다. GameLift의 `StartGameSession` 요청이 SDK 초기화보다 먼저 도착하는 레이스 컨디션은 pending 플래그로 흡수합니다.
 - **리플리케이션 기반 팀 시스템**: 팀 생성/초대/역할 변경을 Server RPC로만 처리하고, `GameStateBase`를 팀 상태의 단일 진실 공급원으로 두어 `OnRep_*`을 통해 클라이언트에 결과만 전파합니다.
+- **커스텀 Replication Graph**: 기본 `UReplicationGraph`를 상속해 액터 클래스별로 리플리케이션 노드를 명시적으로 라우팅합니다. 클래스 → 노드 매핑을 `enum` 룩업 테이블로 캐싱하고 상속 계층을 탐색하며 서브클래스가 별도 등록 없이도 부모의 라우팅을 상속받도록 설계했습니다. 미등록 클래스는 경고 로그로 노출됩니다.
 
 → 자세한 내용은 [Seedworld/README.md](./Seedworld/README.md) 참고.
 
@@ -152,7 +153,7 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 │       ├── CallbackProxy/     (매치메이킹/세션 gRPC 콜백 프록시)
 │       ├── DedicatedServer/   (SeedworldDSGrpcSubsystem 등 DS 전용 서브시스템)
 │       ├── Game/              (SeedworldGrpcSubsystem 등 Client 전용 서브시스템)
-│       ├── GameFramework/     (GameMode/GameState/PlayerState/PlayerController, HUD)
+│       ├── GameFramework/     (GameMode/GameState/PlayerState/PlayerController, HUD, ReplicationGraph)
 │       ├── GameLift/          (GameLift SDK 연동 서브시스템/서버 오브젝트)
 │       └── SubSystem/         (팀 시스템, 헬퍼 서브시스템)
 └── UnrealPlugins/
