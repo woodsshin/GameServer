@@ -93,6 +93,7 @@ A Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server w
 - **Asynchronous gRPC callback proxies**: Proxy objects following the `UBlueprintAsyncActionBase` pattern wrap matchmaking/session-creation RPCs in `OnSuccess`/`OnFail` delegates. In `WITH_EDITOR` builds, these return failure immediately without making a real backend call, cutting off network dependencies during PIE testing.
 - **GameLift fleet orchestration**: On boot, the dedicated server polls its own matchmaking backend to register itself, and validates the PlayerSessionId issued by the GameLift SDK in `PreLogin`. The race condition where GameLift's `StartGameSession` request arrives before SDK initialization completes is absorbed with a pending flag.
 - **Replication-based team system**: Team creation, invitations, and role changes are handled exclusively through Server RPCs, with `GameStateBase` acting as the single source of truth for team state and propagating only the result to clients via `OnRep_*`.
+- **Custom Replication Graph**: Subclasses the stock `UReplicationGraph` to explicitly route each actor class to a replication node. Class → node mappings are cached in an `enum` lookup table and resolved by walking the inheritance chain, so a subclass inherits its parent's routing without needing a registration of its own. Unregistered classes are surfaced through a warning log.
 
 → See [Seedworld/README_EN.md](./Seedworld/README_EN.md) for details.
 
@@ -152,7 +153,7 @@ A Native Code Plugin published on the Unreal Engine Marketplace, usable on both 
 │       ├── CallbackProxy/     (matchmaking/session gRPC callback proxies)
 │       ├── DedicatedServer/   (DS-only subsystems, e.g. SeedworldDSGrpcSubsystem)
 │       ├── Game/              (Client-only subsystems, e.g. SeedworldGrpcSubsystem)
-│       ├── GameFramework/     (GameMode/GameState/PlayerState/PlayerController, HUD)
+│       ├── GameFramework/     (GameMode/GameState/PlayerState/PlayerController, HUD, ReplicationGraph)
 │       ├── GameLift/          (GameLift SDK integration subsystem/server object)
 │       └── SubSystem/         (Team system, helper subsystem)
 └── UnrealPlugins/

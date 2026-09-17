@@ -16,6 +16,7 @@ This README compiles a selection of core code samples from the online/multiplaye
    - [GameLift Server Object — SDK Wrapping & Session State Management](#4-gamelift-server-object--sdk-wrapping--session-state-management)
    - [Online Game Mode — Session Create/Update](#5-online-game-mode--session-createupdate)
    - [BTK Team System — Replication-Based In-Game Team Management](#6-btk-team-system--replication-based-in-game-team-management)
+   - [Custom Replication Graph — Per-Class Node Routing](#7-custom-replication-graph--per-class-node-routing)
 3. [Design Highlights](#design-highlights)
 
 ---
@@ -558,6 +559,107 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 
 ---
 
+### 7. Custom Replication Graph — Per-Class Node Routing
+
+**Files**: `SeedworldReplicationGraph.h`, `SeedworldReplicationGraph.cpp`
+
+A subclass of the stock `UReplicationGraph` that explicitly routes each actor class to a replication node. The class → node mapping is cached in an `enum`-based lookup table (`ClassRoutingMap`); on Add/Remove, that mapping is looked up and the actor is delegated to the matching node.
+
+```cpp
+UENUM()
+enum class ESeedworldRepGraphClassNodeMapping : uint8
+{
+    NotRouted,              // unregistered class — anything left unrouted will not replicate
+    AlwaysRelevant,         // always relevant to every connection, with no notion of space
+    Spatialized_Dynamic,    // grid node, position refreshed every frame
+    Spatialized_Static,     // grid node, actors that never move once placed
+    Spatialized_Dormant,    // grid node + dormancy, no classes registered yet (reserved)
+};
+```
+
+**Registering per-class routing — `bAlwaysRelevant` actors go to the non-spatial node, Pawns to the cull-distance-driven dynamic grid:**
+
+```cpp
+void USeedworldReplicationGraph::InitGlobalActorClassSettings()
+{
+    Super::InitGlobalActorClassSettings();
+    ClassRoutingMap.Reset();
+
+    // ABTKTeam: bAlwaysRelevant = true, no spatial meaning → non-spatial always-relevant node
+    ClassRoutingMap.Add(ABTKTeam::StaticClass(), ESeedworldRepGraphClassNodeMapping::AlwaysRelevant);
+    GlobalActorReplicationInfoMap.SetClassInfo(ABTKTeam::StaticClass(), FClassReplicationInfo());
+
+    // ASeedworldCharacter_BTK (Pawn): moves continuously → Spatialized_Dynamic
+    ClassRoutingMap.Add(ASeedworldCharacter_BTK::StaticClass(), ESeedworldRepGraphClassNodeMapping::Spatialized_Dynamic);
+    const ASeedworldCharacter_BTK* CDO = GetDefault<ASeedworldCharacter_BTK>();
+
+    FClassReplicationInfo ClassInfo;
+    ClassInfo.ReplicationPeriodFrame = GetReplicationPeriodFrameForFrequency(CDO->GetNetUpdateFrequency());
+    if (CDO->bAlwaysRelevant || CDO->bOnlyRelevantToOwner)
+    {
+        ClassInfo.SetCullDistanceSquared(0.f); // always-relevant actors ignore cull distance
+    }
+    else
+    {
+        ClassInfo.SetCullDistanceSquared(CDO->GetNetCullDistanceSquared());
+    }
+    GlobalActorReplicationInfoMap.SetClassInfo(ASeedworldCharacter_BTK::StaticClass(), ClassInfo);
+
+    // ASeedworldDebugTeleportPoint: fixed once placed → Spatialized_Static
+    ClassRoutingMap.Add(ASeedworldDebugTeleportPoint::StaticClass(), ESeedworldRepGraphClassNodeMapping::Spatialized_Static);
+    GlobalActorReplicationInfoMap.SetClassInfo(ASeedworldDebugTeleportPoint::StaticClass(), FClassReplicationInfo());
+}
+```
+
+**Add/Remove routing — delegates to `AlwaysRelevantNode` or `GridNode` (dynamic/static) according to the mapping; an unregistered class produces a warning log instead of failing silently:**
+
+```cpp
+void USeedworldReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo, FGlobalActorReplicationInfo& GlobalInfo)
+{
+    const ESeedworldRepGraphClassNodeMapping Mapping = GetClassNodeMapping(ActorInfo.Actor->GetClass());
+
+    switch (Mapping)
+    {
+    case ESeedworldRepGraphClassNodeMapping::AlwaysRelevant:
+        AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
+        break;
+    case ESeedworldRepGraphClassNodeMapping::Spatialized_Dynamic:
+        GridNode->AddActor_Dynamic(ActorInfo, GlobalInfo);
+        break;
+    case ESeedworldRepGraphClassNodeMapping::Spatialized_Static:
+        GridNode->AddActor_Static(ActorInfo, GlobalInfo);
+        break;
+    case ESeedworldRepGraphClassNodeMapping::NotRouted:
+    default:
+        // record that an actor which was never added to a node will not replicate
+        UE_LOG(SeedworldRepGraphLog, Warning,
+            TEXT("%s (class %s) has no registered routing and will NOT replicate. Add it to InitGlobalActorClassSettings."),
+            *ActorInfo.Actor->GetName(), *ActorInfo.Actor->GetClass()->GetName());
+        break;
+    }
+}
+```
+
+**Resolving the mapping by walking the inheritance chain — designed so a subclass inherits its parent's routing without a registration of its own:**
+
+```cpp
+ESeedworldRepGraphClassNodeMapping USeedworldReplicationGraph::GetClassNodeMapping(UClass* Class) const
+{
+    for (UClass* CurrentClass = Class; CurrentClass; CurrentClass = CurrentClass->GetSuperClass())
+    {
+        if (const ESeedworldRepGraphClassNodeMapping* Found = ClassRoutingMap.Find(CurrentClass))
+        {
+            return *Found;
+        }
+    }
+    return ESeedworldRepGraphClassNodeMapping::NotRouted;
+}
+```
+
+`PlayerState` and `PlayerController` need no class registration of their own — they are covered by the engine's per-connection `AlwaysRelevantForConnection` path (`USeedworldReplicationGraphNode_AlwaysRelevantForConnection`). Since that is owner-only replication, always relevant but only to the owning connection, it is deliberately kept on a separate track from the global grid and always-relevant nodes.
+
+---
+
 ## Design Highlights
 
 | Area | Design Point |
@@ -571,6 +673,7 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 | **Network authority separation** | The team system mutates state only through Server RPCs; clients reflect the result via `OnRep_*` — a local-player check avoids unnecessary broadcasts |
 | **In-game team management** | Each team is spawned as its own replicated `Actor` (`ABTKTeam`), owning invitations/acceptance, kicking, captaincy transfer (with automatic Captain→Lieutenant demotion), and team chat (send/delete) — role-based permissions (Captain/Lieutenant/Member) are validated on every request |
 | **Resource cleanup** | Every callback proxy explicitly clears its delegates in `BeginDestroy()` to prevent dangling bindings |
+| **Replication Graph routing** | Class → node mappings are cached in an `enum` lookup table and resolved by walking up the inheritance chain, so subclasses inherit their parent's routing automatically — unregistered classes are surfaced through a warning log |
 
 ---
 
