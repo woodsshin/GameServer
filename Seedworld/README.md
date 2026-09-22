@@ -16,7 +16,8 @@
    - [GameLift 서버 오브젝트 — SDK 래핑 및 세션 상태 관리](#4-gamelift-서버-오브젝트--sdk-래핑-및-세션-상태-관리)
    - [온라인 게임모드 — 세션 생성/갱신](#5-온라인-게임모드--세션-생성갱신)
    - [BTK 팀 시스템 — 리플리케이션 기반 인게임 팀 관리](#6-btk-팀-시스템--리플리케이션-기반-인게임-팀-관리)
-   - [커스텀 Replication Graph — 클래스별 노드 라우팅](#7-커스텀-replication-graph--클래스별-노드-라우팅)
+   - [Push Model 리플리케이션 — 명시적 Dirty 마킹 기반 변경 감지](#7-push-model-리플리케이션--명시적-dirty-마킹-기반-변경-감지)
+   - [커스텀 Replication Graph — 클래스별 노드 라우팅](#8-커스텀-replication-graph--클래스별-노드-라우팅)
 3. [설계 포인트 요약](#설계-포인트-요약)
 
 ---
@@ -559,7 +560,103 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 
 ---
 
-### 7. 커스텀 Replication Graph — 클래스별 노드 라우팅
+### 7. Push Model 리플리케이션 — 명시적 Dirty 마킹 기반 변경 감지
+
+**파일**: `BTKTeam.h/.cpp`, `SeedworldBTKGameStateBase.h/.cpp`, `SeedworldBTKPlayerState.h/.cpp`
+
+BTK 팀 시스템의 모든 리플리케이트 프로퍼티(`ABTKTeam::TeamID/TeamName/Members/PendingMembers`, `ASeedworldBTKGameStateBase::BTKTeams`, `ASeedworldBTKPlayerState::Team/TeamRole`)는 Push Model로 등록되어 있습니다. 기본 리플리케이션은 매 프레임 모든 리플리케이트 프로퍼티를 이전 값과 비교(diff)해 변경분을 찾지만, Push Model은 그 비교 자체를 건너뛰고 값을 기록 지점에서 직접 dirty를 신고하는 방식으로 전환합니다. 액터 수·프로퍼티 수가 늘어날수록 매 프레임 비교 비용이 커지므로, 자주 갱신되지 않고 변경이 여러 지점에서 발생하는 팀 데이터에 적합한 선택입니다.
+
+**등록 — `DOREPLIFETIME_WITH_PARAMS_FAST` + `FDoRepLifetimeParams`로 Push Model에 옵트인:**
+
+```cpp
+void ABTKTeam::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+    // _WITH_PARAMS_FAST 매크로 계열로 등록하면 해당 프로퍼티는 엔진의 프레임별 dirty-compare에서
+    // 제외되고, 코드에서 명시적으로 호출하는 MARK_PROPERTY_DIRTY_FROM_NAME에만 의존하게 된다.
+    FDoRepLifetimeParams SharedParams;
+    SharedParams.Condition = COND_None;
+    SharedParams.RepNotifyCondition = REPNOTIFY_Always;
+
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, TeamID, SharedParams);
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, TeamName, SharedParams);
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, Members, SharedParams);
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, PendingMembers, SharedParams);
+
+    // ChatMessages는 FFastArraySerializer 자체의 델타 직렬화(NetDeltaSerialize)를 쓰므로 Push Model과는
+    // 무관하게 별도 트랙으로 동작 — MarkArrayDirty()가 이미 변경 신호를 보내고 있어 기존 매크로 유지.
+    DOREPLIFETIME_CONDITION_NOTIFY(ABTKTeam, ChatMessages, COND_None, REPNOTIFY_Always);
+}
+```
+
+**직접 대입 — 값을 쓴 직후 같은 함수 안에서 dirty 마킹 **
+
+```cpp
+void ASeedworldBTKPlayerState::SetTeamRole_Implementation(EBTKTeamRole NewTeamRole)
+{
+    TeamRole = NewTeamRole;
+    MARK_PROPERTY_DIRTY_FROM_NAME(ASeedworldBTKPlayerState, TeamRole, this);
+    OnRep_TeamRole(); // 서버 자신에게는 OnRep이 자동 호출되지 않으므로 즉시 수동 호출
+}
+```
+
+**배열 요소의 in-place 수정 — `Find*`가 반환한 raw 포인터로 멤버 필드만 바꾸는 경우, Push Model은 이 변경을 감지할 방법이 없어 반드시 수동으로 마킹해야 합니다:**
+
+```cpp
+EBTKTeamResult ABTKTeam::AcceptTeamInvitation(const FString& UniqueIDString)
+{
+    FBTKTeamMemberInfo* MemberInfo = FindPendingMemberByUniqueID(UniqueIDString);
+    if (!MemberInfo) return EBTKTeamResult::Not_Found_Player;
+
+    // 포인터를 통해 배열 원소의 필드를 직접 수정 — 배열 자체의 Add/Remove가 아니므로
+    // 엔진이 자동으로 알아챌 수 없다. PendingMembers를 명시적으로 dirty 처리.
+    MemberInfo->Status = EBTKPlayerStatus::Online;
+    MARK_PROPERTY_DIRTY_FROM_NAME(ABTKTeam, PendingMembers, this);
+
+    Members.Add(*MemberInfo); // 이쪽은 Add이므로 별도로 Members도 마킹
+    MARK_PROPERTY_DIRTY_FROM_NAME(ABTKTeam, Members, this);
+    OnRep_Members();
+    ForceNetUpdate();
+    // ...
+}
+```
+
+`SetRoleByUniqueId`(역할 변경 시 대상 멤버와, 위임의 경우 강등되는 본인까지 두 차례 in-place 수정)와 `SetPlayerStatus`(온라인/오프라인 상태 토글) 역시 동일한 패턴을 따릅니다. 포인터로 필드를 고친 모든 지점에서 `MARK_PROPERTY_DIRTY_FROM_NAME`을 짝지어 호출합니다.
+
+**배열 자체의 Add/Remove — `GameStateBase`가 팀 배열의 기준 데이터를 소유하며, 팀 생성/해체 시점에 마킹:**
+
+```cpp
+// 새 팀 스폰 시
+BTKTeams.Add(NewBTKTeam);
+MARK_PROPERTY_DIRTY_FROM_NAME(ASeedworldBTKGameStateBase, BTKTeams, this);
+OnRep_BTKTeams();
+ForceNetUpdate();
+
+// 마지막 멤버가 나가 팀이 빈 경우
+BTKTeams.Remove(BTKTeam);
+MARK_PROPERTY_DIRTY_FROM_NAME(ASeedworldBTKGameStateBase, BTKTeams, this);
+OnRep_BTKTeams();
+ForceNetUpdate();
+```
+
+`BTKTeams` 배열 자체는 Add/Remove에서만 dirty를 신고하면 되고, 개별 `ABTKTeam` 액터 내부의 `TeamName`, `Members` 등은 각 액터 자신의 Push Model 마킹으로 독립적으로 리플리케이트됩니다. 배열에 들어있는 액터의 내부 상태 변경이 배열 자체를 dirty하게 만들지는 않습니다.
+
+**설계 규칙 정리:**
+
+| 상황 | 처리 |
+|---|---|
+| 단순 스칼라 값 대입 (`TeamID = ...`, `TeamRole = ...`) | 대입 직후 같은 지점에서 `MARK_PROPERTY_DIRTY_FROM_NAME` 호출 |
+| 배열 `Add`/`Remove`/`SetNum` | 호출 직후 배열 프로퍼티를 `MARK_PROPERTY_DIRTY_FROM_NAME`로 마킹 |
+| `Find*` 포인터를 통한 배열 원소 필드 수정 | 포인터로 값을 변경한 지점에서 그 배열 프로퍼티를 명시적으로 마킹 (엔진이 감지 불가) |
+| `FFastArraySerializer` 기반 프로퍼티 (`ChatMessages`) | Push Model 대상에서 제외, `MarkArrayDirty()` + 기존 `DOREPLIFETIME_CONDITION_NOTIFY` 유지 |
+| 서버 자신의 UI/로직 갱신 | dirty 마킹은 네트워크 전송만 트리거하므로, 서버 로컬에서 즉시 반영이 필요하면 `OnRep_*`를 직접 호출 |
+
+각 헤더 파일에도 프로퍼티 선언부 바로 위에 "이 프로퍼티를 쓰는 모든 지점은 `MARK_PROPERTY_DIRTY_FROM_NAME`을 호출해야 한다"는 주석을 남겨, 새로운 쓰기 지점을 추가할 때 마킹을 빠뜨리지 않도록 규약을 코드 근처에 명시해두었습니다.
+
+---
+
+### 8. 커스텀 Replication Graph — 클래스별 노드 라우팅
 
 **파일**: `SeedworldReplicationGraph.h`, `SeedworldReplicationGraph.cpp`
 
@@ -671,6 +768,7 @@ ESeedworldRepGraphClassNodeMapping USeedworldReplicationGraph::GetClassNodeMappi
 | **레이스 컨디션 방어** | GameLift `StartGameSession`이 SDK 초기화보다 먼저 오는 경우 pending 플래그로 흡수 후 재생 |
 | **재시도 전략** | 매치메이킹/세션 생성 실패 시 타이머 기반 폴링으로 자동 재시도 (`MatchMakingDSWaitingTime` 간격) |
 | **네트워크 권한 분리** | 팀 시스템은 Server RPC로만 상태를 변경하고, `OnRep_*`를 통해 클라이언트가 결과만 반영 — 로컬 플레이어 여부 체크로 불필요한 브로드캐스트 방지 |
+| **Push Model 리플리케이션** | 팀 관련 프로퍼티는 매 프레임 diff 비교 대신 `MARK_PROPERTY_DIRTY_FROM_NAME` 명시적 마킹으로 전환 — 특히 배열 원소를 raw 포인터로 in-place 수정하는 지점(역할 변경, 상태 토글, 초대 수락)은 엔진이 자동 감지할 수 없어 각 쓰기 지점마다 수동 마킹 필수 |
 | **인게임 팀 관리** | 팀 하나하나가 리플리케이트 `Actor`(`ABTKTeam`)로 스폰되어 초대/수락, 강퇴, Captain→Lieutenant 자동 강등을 동반한 팀장 위임, 팀 채팅(전송/삭제)까지 자체 소유 — 역할별 권한(Captain/Lieutenant/Member)을 각 요청마다 검증 |
 | **리소스 정리** | 모든 콜백 프록시가 `BeginDestroy()`에서 델리게이트를 명시적으로 해제해 댕글링 바인딩 방지 |
 | **Replication Graph 라우팅** | 클래스 → 노드 매핑을 `enum` 룩업 테이블로 캐싱, 상속 계층을 타고 올라가며 탐색해 서브클래스가 자동으로 부모 라우팅 상속 — 미등록 클래스는 경고 로그로 노출 |

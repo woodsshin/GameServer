@@ -16,7 +16,8 @@ This README compiles a selection of core code samples from the online/multiplaye
    - [GameLift Server Object — SDK Wrapping & Session State Management](#4-gamelift-server-object--sdk-wrapping--session-state-management)
    - [Online Game Mode — Session Create/Update](#5-online-game-mode--session-createupdate)
    - [BTK Team System — Replication-Based In-Game Team Management](#6-btk-team-system--replication-based-in-game-team-management)
-   - [Custom Replication Graph — Per-Class Node Routing](#7-custom-replication-graph--per-class-node-routing)
+   - [Push Model Replication — Explicit Dirty-Marking Based Change Detection](#7-push-model-replication--explicit-dirty-marking-based-change-detection)
+   - [Custom Replication Graph — Per-Class Node Routing](#8-custom-replication-graph--per-class-node-routing)
 3. [Design Highlights](#design-highlights)
 
 ---
@@ -559,7 +560,106 @@ TArray<APawn*> USeedworldBTKTeamSubsystem::GetTeamMemberPawns()
 
 ---
 
-### 7. Custom Replication Graph — Per-Class Node Routing
+### 7. Push Model Replication — Explicit Dirty-Marking Based Change Detection
+
+**Files**: `BTKTeam.h/.cpp`, `SeedworldBTKGameStateBase.h/.cpp`, `SeedworldBTKPlayerState.h/.cpp`
+
+Every replicated property in the BTK team system (`ABTKTeam::TeamID/TeamName/Members/PendingMembers`, `ASeedworldBTKGameStateBase::BTKTeams`, `ASeedworldBTKPlayerState::Team/TeamRole`) is registered under Push Model. Default replication scans every replicated property each frame and diffs it against its previous value to find what changed; Push Model skips that per-frame comparison entirely and instead has each write site report itself dirty directly. Since the per-frame diff cost grows with the number of actors and properties, this is a good fit for team data, which updates infrequently but from many different call sites.
+
+**Registration — opting into Push Model via `DOREPLIFETIME_WITH_PARAMS_FAST` + `FDoRepLifetimeParams`:**
+
+```cpp
+void ABTKTeam::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+    // Registering via the _WITH_PARAMS_FAST macro family excludes the property from the engine's
+    // per-frame dirty-compare, so it depends solely on the explicit MARK_PROPERTY_DIRTY_FROM_NAME
+    // calls made in code.
+    FDoRepLifetimeParams SharedParams;
+    SharedParams.Condition = COND_None;
+    SharedParams.RepNotifyCondition = REPNOTIFY_Always;
+
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, TeamID, SharedParams);
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, TeamName, SharedParams);
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, Members, SharedParams);
+    DOREPLIFETIME_WITH_PARAMS_FAST(ABTKTeam, PendingMembers, SharedParams);
+
+    // ChatMessages uses FFastArraySerializer's own delta-serialization (NetDeltaSerialize) and runs
+    // on a track independent of Push Model — MarkArrayDirty() already signals changes, so it keeps
+    // the existing macro.
+    DOREPLIFETIME_CONDITION_NOTIFY(ABTKTeam, ChatMessages, COND_None, REPNOTIFY_Always);
+}
+```
+
+**Direct assignment — mark dirty in the same function, right after the write:**
+
+```cpp
+void ASeedworldBTKPlayerState::SetTeamRole_Implementation(EBTKTeamRole NewTeamRole)
+{
+    TeamRole = NewTeamRole;
+    MARK_PROPERTY_DIRTY_FROM_NAME(ASeedworldBTKPlayerState, TeamRole, this);
+    OnRep_TeamRole(); // OnRep isn't invoked automatically on the server itself, so it's called manually right away
+}
+```
+
+**In-place mutation of array elements — when only a member field is changed through a raw pointer returned by `Find*`, Push Model has no way to detect the change, so it must be marked manually:**
+
+```cpp
+EBTKTeamResult ABTKTeam::AcceptTeamInvitation(const FString& UniqueIDString)
+{
+    FBTKTeamMemberInfo* MemberInfo = FindPendingMemberByUniqueID(UniqueIDString);
+    if (!MemberInfo) return EBTKTeamResult::Not_Found_Player;
+
+    // Modifying a field on an array element directly through a pointer — since this isn't an
+    // Add/Remove on the array itself, the engine can't pick it up automatically. Mark
+    // PendingMembers dirty explicitly.
+    MemberInfo->Status = EBTKPlayerStatus::Online;
+    MARK_PROPERTY_DIRTY_FROM_NAME(ABTKTeam, PendingMembers, this);
+
+    Members.Add(*MemberInfo); // This one is an Add, so Members needs its own separate marking too
+    MARK_PROPERTY_DIRTY_FROM_NAME(ABTKTeam, Members, this);
+    OnRep_Members();
+    ForceNetUpdate();
+    // ...
+}
+```
+
+`SetRoleByUniqueId` (which does two in-place edits when transferring captaincy — the target member, and the requester who gets demoted) and `SetPlayerStatus` (toggling online/offline status) follow the same pattern. Every point that patches a field through a pointer is paired with its own `MARK_PROPERTY_DIRTY_FROM_NAME` call.
+
+**Add/Remove on the array itself — `GameStateBase` owns the source-of-truth team array and marks it dirty at team creation/teardown:**
+
+```cpp
+// When a new team is spawned
+BTKTeams.Add(NewBTKTeam);
+MARK_PROPERTY_DIRTY_FROM_NAME(ASeedworldBTKGameStateBase, BTKTeams, this);
+OnRep_BTKTeams();
+ForceNetUpdate();
+
+// When the last member leaves and the team becomes empty
+BTKTeams.Remove(BTKTeam);
+MARK_PROPERTY_DIRTY_FROM_NAME(ASeedworldBTKGameStateBase, BTKTeams, this);
+OnRep_BTKTeams();
+ForceNetUpdate();
+```
+
+The `BTKTeams` array itself only needs to be reported dirty on Add/Remove; each individual `ABTKTeam` actor's own fields, like `TeamName` and `Members`, replicate independently through that actor's own Push Model marking. A change to an actor's internal state does not, by itself, dirty the array that holds it.
+
+**Summary of the design rules:**
+
+| Situation | Handling |
+|---|---|
+| Plain scalar assignment (`TeamID = ...`, `TeamRole = ...`) | Call `MARK_PROPERTY_DIRTY_FROM_NAME` right after the assignment, in the same spot |
+| Array `Add`/`Remove`/`SetNum` | Mark the array property with `MARK_PROPERTY_DIRTY_FROM_NAME` right after the call |
+| Editing an array element's field via a `Find*` pointer | Explicitly mark that array property at the point the value is changed through the pointer (the engine can't detect it) |
+| `FFastArraySerializer`-based properties (`ChatMessages`) | Excluded from Push Model; keep `MarkArrayDirty()` plus the existing `DOREPLIFETIME_CONDITION_NOTIFY` |
+| Refreshing the server's own UI/logic | Dirty marking only triggers network transmission, so call `OnRep_*` directly whenever the server needs the change reflected locally right away |
+
+Each header also carries a comment directly above the property declaration — "every write site for this property must call `MARK_PROPERTY_DIRTY_FROM_NAME`" — so the convention sits right next to the code and isn't missed when a new write site gets added later.
+
+---
+
+### 8. Custom Replication Graph — Per-Class Node Routing
 
 **Files**: `SeedworldReplicationGraph.h`, `SeedworldReplicationGraph.cpp`
 
@@ -671,6 +771,7 @@ ESeedworldRepGraphClassNodeMapping USeedworldReplicationGraph::GetClassNodeMappi
 | **Race-condition guard** | If GameLift's `StartGameSession` arrives before SDK init completes, a pending flag absorbs it and replays it later |
 | **Retry strategy** | Failed matchmaking/session-creation calls auto-retry via timer-based polling (at `MatchMakingDSWaitingTime` intervals) |
 | **Network authority separation** | The team system mutates state only through Server RPCs; clients reflect the result via `OnRep_*` — a local-player check avoids unnecessary broadcasts |
+| **Push Model replication** | Team-related properties trade the per-frame diff compare for explicit `MARK_PROPERTY_DIRTY_FROM_NAME` marking — in particular, points that edit an array element in place through a raw pointer (role changes, status toggles, invitation acceptance) can't be picked up automatically by the engine, so each write site marks it by hand |
 | **In-game team management** | Each team is spawned as its own replicated `Actor` (`ABTKTeam`), owning invitations/acceptance, kicking, captaincy transfer (with automatic Captain→Lieutenant demotion), and team chat (send/delete) — role-based permissions (Captain/Lieutenant/Member) are validated on every request |
 | **Resource cleanup** | Every callback proxy explicitly clears its delegates in `BeginDestroy()` to prevent dangling bindings |
 | **Replication Graph routing** | Class → node mappings are cached in an `enum` lookup table and resolved by walking up the inheritance chain, so subclasses inherit their parent's routing automatically — unregistered classes are surfaced through a warning log |
