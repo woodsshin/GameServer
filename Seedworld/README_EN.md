@@ -1,6 +1,6 @@
 # Seedworld — Online & Multiplayer Systems (Unreal Engine 5)
 
-This README compiles a selection of core code samples from the online/multiplayer backend integration modules designed and implemented for the **Seedworld** project, curated for portfolio review. It covers real-time multiplayer infrastructure spanning both client and server: AWS GameLift–based dedicated server orchestration, a gRPC-based matchmaking client, and a replication-driven team system.
+This README compiles a selection of core code samples from the online/multiplayer backend integration modules designed and implemented for the **Seedworld**([https://x.com/SeedworldMeta](https://x.com/SeedworldMeta)) project, curated for portfolio review. It covers real-time multiplayer infrastructure spanning both client and server: AWS GameLift–based dedicated server orchestration, a gRPC-based matchmaking client, and a replication-driven team system.
 
 > Engine: Unreal Engine 5 (C++) · Backend integrations: AWS GameLift, gRPC (TurboLink), EOS (Epic Online Services), AdvancedSessions Plugin
 

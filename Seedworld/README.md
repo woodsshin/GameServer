@@ -1,6 +1,6 @@
 # Seedworld — Online & Multiplayer Systems (Unreal Engine 5)
 
-이 문서는 **Seedworld** 프로젝트에서 설계·구현한 온라인/멀티플레이어 백엔드 연동 모듈 중 포트폴리오용으로 발췌한 핵심 코드 샘플을 정리한 README입니다. AWS GameLift 기반 데디케이티드 서버 오케스트레이션, gRPC 기반 매치메이킹 클라이언트, 그리고 리플리케이션 기반 팀 시스템까지 — 클라이언트/서버 양쪽에서 동작하는 실시간 멀티플레이어 인프라를 다룹니다.
+이 문서는 **Seedworld**([https://x.com/SeedworldMeta](https://x.com/SeedworldMeta)) 프로젝트에서 설계·구현한 온라인/멀티플레이어 백엔드 연동 모듈 중 포트폴리오용으로 발췌한 핵심 코드 샘플을 정리한 README입니다. AWS GameLift 기반 데디케이티드 서버 오케스트레이션, gRPC 기반 매치메이킹 클라이언트, 그리고 리플리케이션 기반 팀 시스템까지 — 클라이언트/서버 양쪽에서 동작하는 실시간 멀티플레이어 인프라를 다룹니다.
 
 > 엔진: Unreal Engine 5 (C++) · 백엔드 연동: AWS GameLift, gRPC(TurboLink), EOS(Epic Online Services), AdvancedSessions Plugin
 

@@ -1,6 +1,6 @@
 # icarus-backend-services
 
-A collection of Go-based microservices making up the Icarus game backend. Each service is deployed independently and communicates with the others via RabbitMQ (AMQP/STOMP) as a shared message bus. The `OnlineSubsystemIcarus` on the Unreal Engine client side (a separate repository) integrates directly with these services over a WebSocket/STOMP wire protocol.
+A collection of Go-based microservices making up the **Icarus**([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)) game backend. Each service is deployed independently and communicates with the others via RabbitMQ (AMQP/STOMP) as a shared message bus. The `OnlineSubsystemIcarus` on the Unreal Engine client side (a separate repository) integrates directly with these services over a WebSocket/STOMP wire protocol.
 
 ```
 adminproxy/     Admin-facing HTTP → RabbitMQ RPC gateway (internal network only)

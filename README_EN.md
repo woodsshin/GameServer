@@ -2,7 +2,7 @@
 
 A collection of projects centered on Network Programming and Game Engine Middleware. Each project is organized like an independent repository, and detailed implementation notes and verification results can be found via the links below.
 
-**Seedworld** is a Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server with AWS GameLift and integrates with a custom gRPC matchmaking backend. The three projects under **UnrealPlugins** (OnlineSubsystemEOS, OnlineSubsystemIcarus, SimpleUPNP) are all Native Code Plugins/Modules that run on an Unreal Engine Dedicated Server (and Client) that I implemented myself. **Backend** is likewise described with a focus on the microservices I personally developed; microservices co-developed with full-stack engineers are not included.
+**Seedworld**([https://x.com/SeedworldMeta](https://x.com/SeedworldMeta)) is a Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server with AWS GameLift and integrates with a custom gRPC matchmaking backend. The three projects under **UnrealPlugins** (OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP) are all Native Code Plugins/Modules that run on an Unreal Engine Dedicated Server (and Client) that I implemented myself. **Backend** is likewise described with a focus on the microservices I personally developed; microservices co-developed with full-stack engineers are not included.
 
 | Project | Summary | Stack |
 |---|---|---|
