@@ -255,7 +255,7 @@ UGE_Damage::UGE_Damage()
     Executions.Add(ExecutionDefinition);
 }
 
-// 무기 측 — 데미지 크기를 SetByCaller로 주입해 타깃 ASC에 적용
+// 무기 측 — 데미지 크기를 SetByCaller로 타깃 ASC에 적용
 const FGameplayEffectSpecHandle SpecHandle = SourceASC->MakeOutgoingSpec(UGE_Damage::StaticClass(), 1.f, EffectContext);
 if (SpecHandle.IsValid())
 {
@@ -264,7 +264,7 @@ if (SpecHandle.IsValid())
 }
 ```
 
-발사 비용도 같은 방식입니다. `GE_Cost_Fire`는 Ammo / Stamina 두 어트리뷰트에 Additive Modifier를 두고, 크기는 `SetByCaller`(`Data.Cost.Ammo`, `Data.Cost.Stamina`)로 발사 시점에 주입받습니다.
+발사 비용도 같은 방식입니다. `GE_Cost_Fire`는 Ammo / Stamina 두 어트리뷰트에 Additive Modifier를 두고, 크기는 `SetByCaller`(`Data.Cost.Ammo`, `Data.Cost.Stamina`)로 발사 시점에 적용합니다.
 소모량은 무기 데이터(`AmmoCost`, `StaminaCost`)가 제공하며 `GA_Fire_Base::CommitFireCost`가 이를 읽습니다.
 
 ```cpp

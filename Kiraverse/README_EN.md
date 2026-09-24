@@ -264,7 +264,7 @@ if (SpecHandle.IsValid())
 }
 ```
 
-Firing cost works the same way. `GE_Cost_Fire` places Additive Modifiers on the Ammo and Stamina attributes, and their magnitudes are injected at fire time through `SetByCaller` (`Data.Cost.Ammo`, `Data.Cost.Stamina`).
+Firing cost works the same way. `GE_Cost_Fire` places Additive Modifiers on the Ammo and Stamina attributes, and their magnitudes are applied at fire time through `SetByCaller` (`Data.Cost.Ammo`, `Data.Cost.Stamina`).
 The consumption amounts come from weapon data (`AmmoCost`, `StaminaCost`), which `GA_Fire_Base::CommitFireCost` reads.
 
 ```cpp
