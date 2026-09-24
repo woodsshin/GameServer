@@ -15,9 +15,13 @@ A collection of projects centered on Network Programming and Game Engine Middlew
 
 ---
 
-## Perspective — Why These Five Projects
+## Portfolio Overview & Key Focus
 
-Excluding Kiraverse, all five projects here address the same underlying problem — **how to establish a communication path between clients** — but at different layers. Among them, OnlineSubsystemIcarus and Seedworld are also a pair that give opposite answers to the same question of "where and how should the server run?" — the former is P2P, where the client itself becomes the host; the latter is a Dedicated Server, auto-scaled as a fleet by AWS GameLift.
+The projects in this portfolio explore the common challenge of **securing client-to-client communication channels** across different network layers.
+
+Among them, **OnlineSubsystemIcarus** and **Seedworld** represent two opposing paradigms in server orchestration. While Icarus implements a client-hosted P2P model, Seedworld uses AWS GameLift to dynamically scale dedicated server fleets according to demand.
+
+Finally, **Kiraverse** extends this scope beyond network infrastructure, showcasing the design of a server-authoritative combat core using Unreal Engine's Gameplay Ability System (GAS).
 
 ```
                     ┌─────────────────────────────────────────────────────────┐

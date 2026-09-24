@@ -15,9 +15,13 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 
 ---
 
-## 관점 — 왜 이 다섯 프로젝트인가
+## 포트폴리오 개요 및 핵심 관점
 
-Kiraverse를 제외한 다섯 프로젝트는 모두 **Client 간 통신 경로를 어떻게 확보할 것인가**라는 동일한 문제를 서로 다른 계층에서 다룹니다. 그중 OnlineSubsystemIcarus와 Seedworld는 "서버를 어디서, 어떻게 띄울 것인가"라는 같은 질문에 서로 반대되는 답을 내놓는 한 쌍이기도 합니다 — 전자는 Client가 호스트가 되는 P2P, 후자는 AWS GameLift가 Fleet을 Auto-scaling하는 Dedicated Server입니다.
+본 포트폴리오의 프로젝트들은 서로 다른 네트워크 계층에서 클라이언트 간 통신 경로 확보라는 공통의 과제를 다룹니다.
+
+그중 **OnlineSubsystemIcarus**와 **Seedworld**는 서버 오케스트레이션 영역에서 대립되는 두 가지 패러다임을 보여줍니다. Icarus가 클라이언트 호스팅 기반의 P2P 모델을 구현한 반면, Seedworld는 AWS GameLift를 활용해 수요에 따라 데디케이티드 서버(Dedicated Server) 플릿을 동적으로 스케일링합니다.
+
+마지막으로 **Kiraverse**는 네트워크 인프라 영역을 넘어, 언리얼 엔진의 Gameplay Ability System(GAS)을 기반으로 한 서버 권위(Server-Authoritative) 전투 코어 설계 방식을 보여줍니다.
 
 ```
                     ┌─────────────────────────────────────────────────────────┐
