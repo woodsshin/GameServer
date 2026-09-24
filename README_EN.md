@@ -2,7 +2,7 @@
 
 A collection of projects centered on Network Programming and Game Engine Middleware. Each project is organized like an independent repository, and detailed implementation notes and verification results can be found via the links below.
 
-**Seedworld**([https://x.com/SeedworldMeta](https://x.com/SeedworldMeta)) is a Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server with AWS GameLift and integrates with a custom gRPC matchmaking backend. The three projects under **UnrealPlugins** (OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP) are all Native Code Plugins/Modules that run on an Unreal Engine Dedicated Server (and Client) that I implemented myself. **Backend** is likewise described with a focus on the microservices I personally developed; microservices co-developed with full-stack engineers are not included.
+**Seedworld**([@SeedworldMeta](https://x.com/SeedworldMeta)) is a Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server with AWS GameLift and integrates with a custom gRPC matchmaking backend. The three projects under **UnrealPlugins** (OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP) are all Native Code Plugins/Modules that run on an Unreal Engine Dedicated Server (and Client) that I implemented myself. **Backend** is likewise described with a focus on the microservices I personally developed; microservices co-developed with full-stack engineers are not included. **Kiraverse** ([@Kiraversegame](https://x.com/Kiraversegame)) is the combat core of a PvP multiplayer game built on Unreal Engine 5.4's Gameplay Ability System (GAS); only the gameplay core of the competitive mode (the GAS-based combat system and the bomb plant/defuse round loop) is excerpted here for portfolio purposes.
 
 | Project | Summary | Stack |
 |---|---|---|
@@ -11,12 +11,13 @@ A collection of projects centered on Network Programming and Game Engine Middlew
 | [Backend](./Backend/README_EN.md) | A collection of Go-based microservices making up the Icarus game backend. An independently deployed structure using RabbitMQ as a shared message bus | Go, RabbitMQ (AMQP/STOMP), Kubernetes, Redis, MySQL |
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README_EN.md) | A Native Code Plugin that wraps Epic Online Services in Unreal Engine's standard `OnlineSubsystem` interface | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README_EN.md) | A Native Code Plugin that automatically registers port forwarding on a router via the UPnP IGD protocol | Unreal Engine, C++, SSDP/SOAP |
+| [Kiraverse](./Kiraverse/README_EN.md) | A C++ multiplayer gameplay core built on Unreal Engine 5.4's Gameplay Ability System (GAS). Implements a Hitscan/Projectile weapon-swap architecture and a Bomb Defusal (plant/defuse) round loop | Unreal Engine, C++, Gameplay Ability System |
 
 ---
 
 ## Perspective — Why These Five Projects
 
-All five projects address the same underlying problem — **how to establish a communication path between clients** — but at different layers. Among them, OnlineSubsystemIcarus and Seedworld are also a pair that give opposite answers to the same question of "where and how should the server run?" — the former is P2P, where the client itself becomes the host; the latter is a Dedicated Server, auto-scaled as a fleet by AWS GameLift.
+Excluding Kiraverse, all five projects here address the same underlying problem — **how to establish a communication path between clients** — but at different layers. Among them, OnlineSubsystemIcarus and Seedworld are also a pair that give opposite answers to the same question of "where and how should the server run?" — the former is P2P, where the client itself becomes the host; the latter is a Dedicated Server, auto-scaled as a fleet by AWS GameLift.
 
 ```
                     ┌─────────────────────────────────────────────────────────┐
@@ -130,6 +131,23 @@ A Native Code Plugin published on the Unreal Engine Marketplace, usable on both 
 
 ---
 
+## Kiraverse
+
+Kiraverse ([@Kiraversegame](https://x.com/Kiraversegame)) is a free-to-play multiplayer game played in PvP mode, where teams earn tokens and collectables that can be traded or rented out as part of its economy system. This repository excerpts, for portfolio purposes, only the C++ multiplayer gameplay core built on Unreal Engine 5.4's **Gameplay Ability System** (GAS) — Jump/Dash/Zoom/Fire abilities, a Hitscan (single-shot/automatic)/Projectile weapon-swap architecture, and a Bomb Defusal (plant/defuse) round loop; the token/collectable/trading economy system is not included.
+
+Where the five projects above address establishing a communication path between clients (the network layer), Kiraverse addresses a different, higher-layer problem: **how to structure and synchronize gameplay/combat logic running on top of that layer under server authority**.
+
+**Key Design**
+- **Tag-driven Ability Architecture**: Native Gameplay Tags unify input routing and activation conditions (`ActivationBlockedTags`/`ActivationOwnedTags`), reducing coupling between abilities.
+- **Data-driven Weapon System**: Hitscan/Projectile weapons are composed purely from weapon-actor data (`FireAbilityClass`, recoil, spread, zoom, and cost), with the Fire ability granted and revoked on weapon swap.
+- **Unified Damage Pipeline**: `SetByCaller` plus `UGameplayEffectExecutionCalculation` unifies the damage-application path regardless of weapon type.
+- **Event-driven Round Loop**: The bomb actor announces state changes via Multicast Delegates, and the GameMode subscribes to drive the round state machine.
+- **Replication-aware Design**: Built around `LocalPredicted` predictive execution, server-authoritative adjudication, and RepNotify-based state synchronization.
+
+→ See [Kiraverse/README_EN.md](./Kiraverse/README_EN.md) for details.
+
+---
+
 ## Directory Structure
 
 ```
@@ -148,6 +166,14 @@ A Native Code Plugin published on the Unreal Engine Marketplace, usable on both 
 │   │   └── README_EN.md
 │   └── sessionmanager/
 │       └── README_EN.md
+├── Kiraverse/
+│   ├── README_EN.md
+│   └── Source/Kiraverse/
+│       ├── AbilitySystem/     (Native Gameplay Tags, AttributeSet, common ability base)
+│       ├── Character/         (KiraverseCharacter — owns the ASC, input → ability routing)
+│       ├── Weapon/            (Weapon base, Hitscan/Projectile, WeaponComponent)
+│       ├── Bomb/              (Bomb actor, BombSite, BombComponent)
+│       └── Game/              (GameMode/GameState/PlayerState, round loop)
 ├── Seedworld/
 │   ├── README_EN.md
 │   └── Source/

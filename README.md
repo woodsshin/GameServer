@@ -2,7 +2,7 @@
 
 Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 모음입니다. 각 프로젝트는 독립된 Repository처럼 구성되어 있으며, 하단 링크에서 세부 구현과 검증 결과를 확인할 수 있습니다.
 
-**Seedworld**([https://x.com/SeedworldMeta](https://x.com/SeedworldMeta))는 Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드와 연동하는 Game Mode/Subsystem 계층입니다. **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다.
+**Seedworld**([@SeedworldMeta](https://x.com/SeedworldMeta))는 Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드와 연동하는 Game Mode/Subsystem 계층입니다. **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다. **Kiraverse**([@Kiraversegame](https://x.com/Kiraversegame))는 Unreal Engine 5.4의 Gameplay Ability System(GAS)을 기반으로 구현한 PvP 멀티플레이어 게임의 전투 코어이며, 경쟁 모드의 게임플레이 코어(GAS 기반 전투 시스템, 폭탄 설치·해체 라운드 루프)만 포트폴리오 목적으로 발췌했습니다.
 
 | Project | 요약 | Stack |
 |---|---|---|
@@ -11,12 +11,13 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 | [Backend](./Backend/README.md) | Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음. RabbitMQ를 공용 message bus로 사용하는 독립 배포 구조 | Go, RabbitMQ(AMQP/STOMP), Kubernetes, Redis, MySQL |
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README.md) | Epic Online Services를 Unreal Engine의 표준 `OnlineSubsystem` Interface로 wrapping한 Native Code Plugin | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
+| [Kiraverse](./Kiraverse/README.md) | Unreal Engine 5.4의 Gameplay Ability System(GAS) 기반 C++ 멀티플레이어 게임플레이 코어. Hitscan/Projectile 무기 교체 구조와 폭탄 설치·해체(Bomb Defusal) 라운드 루프 구현 | Unreal Engine, C++, Gameplay Ability System |
 
 ---
 
 ## 관점 — 왜 이 다섯 프로젝트인가
 
-다섯 프로젝트는 모두 **Client 간 통신 경로를 어떻게 확보할 것인가**라는 동일한 문제를 서로 다른 계층에서 다룹니다. 그중 OnlineSubsystemIcarus와 Seedworld는 "서버를 어디서, 어떻게 띄울 것인가"라는 같은 질문에 서로 반대되는 답을 내놓는 한 쌍이기도 합니다 — 전자는 Client가 호스트가 되는 P2P, 후자는 AWS GameLift가 Fleet을 Auto-scaling하는 Dedicated Server입니다.
+Kiraverse를 제외한 다섯 프로젝트는 모두 **Client 간 통신 경로를 어떻게 확보할 것인가**라는 동일한 문제를 서로 다른 계층에서 다룹니다. 그중 OnlineSubsystemIcarus와 Seedworld는 "서버를 어디서, 어떻게 띄울 것인가"라는 같은 질문에 서로 반대되는 답을 내놓는 한 쌍이기도 합니다 — 전자는 Client가 호스트가 되는 P2P, 후자는 AWS GameLift가 Fleet을 Auto-scaling하는 Dedicated Server입니다.
 
 ```
                     ┌─────────────────────────────────────────────────────────┐
@@ -130,6 +131,23 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 
 ---
 
+## Kiraverse
+
+Kiraverse([@Kiraversegame](https://x.com/Kiraversegame))는 PvP 모드로 플레이하는 Free-to-Play 멀티플레이어 게임으로, 팀 단위로 토큰과 수집품(Collectables)을 획득해 거래하거나 대여하는 경제 시스템을 갖고 있습니다. 이 저장소에는 그중 Unreal Engine 5.4의 **Gameplay Ability System**(GAS)을 기반으로 구현한 C++ 멀티플레이어 게임플레이 코어만 포트폴리오 목적으로 발췌되어 있습니다 — Jump/Dash/Zoom/Fire 어빌리티, Hitscan(단발·연발)/Projectile 무기 교체 구조, 폭탄 설치·해체(Bomb Defusal) 라운드 루프이며, 토큰·수집품·거래 등 경제 시스템은 포함하지 않습니다.
+
+위 다섯 프로젝트가 Client 간 통신 경로 확보(네트워크 계층)를 다뤘다면, Kiraverse는 그 위에서 동작하는 **Gameplay/Combat 로직을 서버 권위 하에 어떻게 구조화하고 동기화할 것인가**라는 다른 계층의 문제를 다룹니다.
+
+**핵심 설계**
+- **Tag-driven Ability Architecture**: Native Gameplay Tag로 입력 라우팅과 활성화 조건(`ActivationBlockedTags`/`ActivationOwnedTags`)을 통일해 어빌리티 간 결합도를 낮췄습니다.
+- **Data-driven Weapon System**: 무기 액터의 데이터(`FireAbilityClass`, 반동·탄퍼짐·줌·소모량)만으로 Hitscan/Projectile 무기를 구성하고, 교체 시 Fire 어빌리티를 부여·회수합니다.
+- **Unified Damage Pipeline**: `SetByCaller`와 `UGameplayEffectExecutionCalculation`으로 무기 종류와 무관하게 데미지 적용 경로를 단일화했습니다.
+- **Event-driven Round Loop**: 폭탄 액터가 Multicast Delegate로 상태 변화를 통지하고, GameMode가 이를 구독해 라운드 상태 머신을 진행합니다.
+- **Replication-aware Design**: `LocalPredicted` 예측 실행, 서버 권위(Server-authoritative) 판정, RepNotify 기반 상태 동기화를 전제로 설계했습니다.
+
+→ 자세한 내용은 [Kiraverse/README.md](./Kiraverse/README.md) 참고.
+
+---
+
 ## Directory 구조
 
 ```
@@ -148,6 +166,14 @@ Unreal Engine Marketplace에 등록된 Native Code Plugin으로, Listen 서버�
 │   │   └── README.md
 │   └── sessionmanager/
 │       └── README.md
+├── Kiraverse/
+│   ├── README.md
+│   └── Source/Kiraverse/
+│       ├── AbilitySystem/     (Native Gameplay Tags, AttributeSet, 어빌리티 공통 베이스)
+│       ├── Character/         (KiraverseCharacter — ASC 보유, 입력 → 어빌리티 라우팅)
+│       ├── Weapon/            (무기 베이스, Hitscan/Projectile, WeaponComponent)
+│       ├── Bomb/              (폭탄 액터, BombSite, BombComponent)
+│       └── Game/              (GameMode/GameState/PlayerState, 라운드 루프)
 ├── Seedworld/
 │   ├── README.md
 │   └── Source/
