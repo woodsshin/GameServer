@@ -4,6 +4,11 @@
 #include "AbilitySystem/KiraverseGameplayTags.h"
 #include "Weapon/KiraverseWeaponComponent.h"
 #include "Bomb/KiraverseBombComponent.h"
+#include "Bomb/KiraverseBomb.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "TimerManager.h"
 #include "AbilitySystemComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -147,7 +152,89 @@ void AKiraverseCharacter::ActivateBombChannelAbility()
 	}
 }
 
+void AKiraverseCharacter::HandleDeath(AKiraverseCharacter* Killer)
+{
+	if (!HasAuthority() || bIsDead)
+	{
+		return;
+	}
+
+	// Cancel first so an in-flight plant/defuse/fire ends cleanly before State.Dead blocks new activations.
+	if (AbilitySystemComponent)
+	{
+		AbilitySystemComponent->CancelAllAbilities();
+		AbilitySystemComponent->AddLooseGameplayTag(KiraverseGameplayTags::State_Dead);
+	}
+
+	// A carrier who dies must leave the bomb pickable; a bomb left attached to a corpse can never be picked up.
+	if (BombComponent && BombComponent->HasBomb())
+	{
+		AKiraverseBomb* Bomb = BombComponent->GetCarriedBomb();
+		BombComponent->ReleaseCarriedBomb();
+		if (Bomb)
+		{
+			Bomb->DropAtCurrentLocation();
+		}
+	}
+
+	bIsDead = true;
+	EnterRagdoll();
+
+	// Server does not receive its own OnRep, so broadcast here; clients broadcast from OnRep_IsDead.
+	OnCharacterDied.Broadcast(this, Killer);
+}
+
+void AKiraverseCharacter::OnRep_IsDead()
+{
+	if (bIsDead)
+	{
+		EnterRagdoll();
+		OnCharacterDied.Broadcast(this, nullptr);
+	}
+}
+
+void AKiraverseCharacter::EnterRagdoll()
+{
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->StopMovementImmediately();
+		Movement->DisableMovement();
+	}
+
+	// Capsule stops blocking so the ragdoll (and other players) are not held up by an invisible cylinder.
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	if (USkeletalMeshComponent* SkeletalMesh = GetMesh())
+	{
+		SkeletalMesh->SetCollisionProfileName(RagdollCollisionProfileName);
+		SkeletalMesh->SetAllBodiesSimulatePhysics(true);
+		SkeletalMesh->WakeAllRigidBodies();
+	}
+
+	// Stop routing input to a corpse; the controller's view moves to the kill cam instead.
+	if (APlayerController* PlayerController = Cast<APlayerController>(GetController()))
+	{
+		DisableInput(PlayerController);
+	}
+
+	if (RagdollFreezeDelay > 0.f)
+	{
+		GetWorldTimerManager().SetTimer(RagdollFreezeTimerHandle, [this]()
+		{
+			if (USkeletalMeshComponent* SkeletalMesh = GetMesh())
+			{
+				SkeletalMesh->SetSimulatePhysics(false);
+			}
+		}, RagdollFreezeDelay, false);
+	}
+}
+
 void AKiraverseCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AKiraverseCharacter, bIsDead);
 }

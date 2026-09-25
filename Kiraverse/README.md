@@ -46,6 +46,20 @@ Source/Kiraverse/
    │     └─ DamageExecCalculation.*    SetByCaller 데미지를 Damage 속성에 기록
    ├─ Character/
    │  └─ KiraverseCharacter.*          ASC 보유, Enhanced Input → 태그 기반 어빌리티 발동
+   │                                   사망 판정(HandleDeath) · Ragdoll 전환 · OnCharacterDied Delegate
+   ├─ Player/
+   │  └─ KiraversePlayerController.*   킬캠(살아있는 팀원 스펙테이트) 서버 권위 + Client RPC로 뷰 타깃 적용
+   ├─ AI/
+   │  ├─ KiraverseAIController.*       BT 실행 + 프레임 단위 조준(오차·회전속도 스무딩)
+   │  ├─ KiraverseAIQueries.*          BT 노드가 공유하는 무상태 월드 조회 함수 (namespace)
+   │  ├─ KiraverseBlackboardKeys.h     Blackboard 키 이름 상수
+   │  └─ BehaviorTree/
+   │     ├─ BTService_UpdateWorldState.*  적/폭탄/사이트/위협 정보를 Blackboard에 기록
+   │     ├─ BTDecorator_RoundActive.*     라운드 진행 중 + 생존 상태일 때만 서브트리 통과
+   │     ├─ BTTask_EngageTarget.*         조준 + 사격 (Abort 시 발사 취소 보장)
+   │     ├─ BTTask_BombChannel.*          Plant / Defuse 채널 실행, 결과는 폭탄 상태로 재검증
+   │     ├─ BTTask_PickUpBomb.*           폭탄 줍기
+   │     └─ BTTask_GuardBomb.*            설치된 폭탄 엄호 + 시야 스캔(Sine Sweep)
    ├─ Weapon/
    │  ├─ KiraverseWeaponBase.*         Fire() 순가상함수 + 무기 데이터(FireAbilityClass 등)
    │  ├─ KiraverseWeapon_Hitscan.*     라인 트레이스
@@ -385,8 +399,11 @@ stateDiagram-v2
     WaitingToStart --> InProgress : StartRound
     InProgress --> BombPlanted : OnPlanted
     InProgress --> RoundEnded : Round timeout / Defenders +1
+    InProgress --> RoundEnded : Attackers wiped out / Defenders +1
     BombPlanted --> RoundEnded : OnDefused / Defenders +1
     BombPlanted --> RoundEnded : OnExploded / Attackers +1
+    BombPlanted --> RoundEnded : Defenders wiped out / Attackers +1
+    InProgress --> RoundEnded : Defenders wiped out / Attackers +1
     RoundEnded --> InProgress : RoundEndDelay 후 StartRound
 ```
 
@@ -403,7 +420,8 @@ stateDiagram-v2
 
 **라운드 흐름** — `StartPlay` → `AssignTeams`(인덱스 짝/홀로 균등 분배) → `StartRound`.
 `StartRound`는 플레이어 재시작, Team 태그 재적용, 팀별 Plant / Defuse 어빌리티 부여, 공격측 무작위 1인에게 폭탄 지급, 라운드 타이머 시작 순으로 진행합니다.
-종료 조건은 ① 제한 시간 내 미설치 → 수비 승, ② 폭발 → 공격 승, ③ 해체 → 수비 승입니다.
+종료 조건은 ① 제한 시간 내 미설치 → 수비 승, ② 폭발 → 공격 승, ③ 해체 → 수비 승, ④ 팀 전멸 → 상대 팀 승입니다.
+④는 `AKiraverseCharacter::OnCharacterDied`가 발생할 때마다 `CheckWipeOut`이 판정합니다 — 수비측 전멸은 설치 여부와 무관하게 공격 승, 공격측 전멸은 폭탄이 아직 설치되지 않았을 때만 수비 승(설치 후에는 퓨즈/해체가 결과를 결정). 자세한 내용은 7장을 참고하세요.
 
 #### 6.1 이벤트 기반 결합 해소 (Observer)
 
@@ -472,7 +490,7 @@ void UGA_Bomb_Channeled::ChannelTick()
         return;
     }
 
-    // 종료 사유는 "시간이 찼는가"가 아니라 "실제 액션이 성공했는가"를 따른다
+    // 종료 사유는 설치 시간이 만료되었는지가 아니라 실제 액션이 성공했는지를 확인한다.
     AKiraverseCharacter* Character = GetCachedCharacter();
     const bool bCompletedSuccessfully = Character && OnChannelCompleted(Character);
 
@@ -543,8 +561,8 @@ bool UGA_Bomb_Plant::OnChannelCompleted(AKiraverseCharacter* Character)
 
 #### 6.4 팀 게이팅과 Team 태그 동기화
 
-- **1차 게이트 — 부여하지 않는다**: GameMode가 공격측에게는 Plant, 수비측에게는 Defuse만 부여합니다(`GrantTeamBombAbility`). 잘못된 팀의 어빌리티는 ASC에 존재하지 않습니다. 이미 부여된 경우를 `FindAbilitySpecFromClass`로 확인해 라운드 반복 시 중복 부여를 막습니다.
-- **2차 게이트 — 태그로 차단한다**: `ActivationBlockedTags`(Plant는 `Team.Defenders`, Defuse는 `Team.Attackers`)가 보조 안전망 역할을 합니다.
+- **1차 게이트 — 폭탄관련 어빌리티를 부여하지 않는다**. GameMode가 공격측에게는 Plant, 수비측에게는 Defuse만 부여합니다(`GrantTeamBombAbility`). 잘못된 팀의 어빌리티는 ASC에 존재하지 않습니다. 이미 부여된 경우를 `FindAbilitySpecFromClass`로 확인해 라운드 반복 시 중복 부여를 막습니다.
+- **2차 게이트 — 폭탄관련 어빌리티를 태그로 차단한다**. `ActivationBlockedTags`(Plant는 `Team.Defenders`, Defuse는 `Team.Attackers`)가 보조 안전망 역할을 합니다.
 - **Team 태그 동기화**: loose tag는 복제되지 않으므로, 복제되는 원본 상태인 `PlayerState::Team`을 기준으로 서버(`SetTeam`)와 클라이언트(`OnRep_Team`)가 각각 자기 ASC에 Team 태그를 적용합니다.
 
 ```cpp
@@ -598,16 +616,131 @@ void AKiraversePlayerState::OnRep_Team(ETeam OldTeam)
 - Plant / Defuse 어빌리티가 GameMode를 참조하지 않도록 `BombFuseTime`을 어빌리티에도 두었습니다. 결합도를 낮추는 대신 두 값을 동기화해 관리해야 하는 trade-off입니다.
 - 라운드 도중 합류한 플레이어(`PostLogin`)는 인원이 적은 팀에 배정되며, 다음 라운드부터 폭탄 캐리어 후보가 됩니다.
 
-### 7. Replication 설계 요약
+### 7. 사망 처리 · Ragdoll · 킬캠
+
+체력이 0이 되는 시점을 **한 곳**(`AttributeSet::PostGameplayEffectExecute`, `Damage`를 `Health`로 반영하는 지점)에서만 판정해, `death` 이벤트가 여러 경로로 중복 발생하지 않도록 했습니다.
+
+```mermaid
+sequenceDiagram
+    participant AS as AttributeSet
+    participant Char as KiraverseCharacter
+    participant PC as PlayerController
+    participant GM as GameMode
+
+    AS->>AS: NewHealth <= 0
+    AS->>Char: HandleDeath(Killer)
+    Char->>Char: CancelAllAbilities + State.Dead 부여
+    Char->>Char: 폭탄 소지 중이면 Release + Drop
+    Char->>Char: EnterRagdoll (Movement/Collision 해제, 물리 시뮬)
+    Char-->>Char: OnCharacterDied.Broadcast (서버) / OnRep_IsDead (클라이언트)
+    Char->>GM: OnCharacterDied
+    GM->>PC: 사망자 소유자 → BeginKillCam
+    GM->>PC: 그 외 → OnWatchedCharacterDied(관전 대상 갱신)
+    GM->>GM: CheckWipeOut
+```
+
+| 관심사 | 구현 |
+|---|---|
+| 사망 판정 위치 | `UKiraverseAttributeSet::PostGameplayEffectExecute` — `Damage` 소비 직후, `Health <= 0`이면 즉시 1회 판정 |
+| 킬러 식별 | `FGameplayEffectContextHandle::GetOriginalInstigator()` (Hitscan / Projectile 양쪽 모두 `AddInstigator(Shooter, ...)`로 설정) |
+| 어빌리티 차단 | `State.Dead`를 모든 어빌리티의 공통 베이스(`UKiraverseGameplayAbility`)에서 `ActivationBlockedTags`로 차단 — 서브클래스마다 따로 차단할 필요 없음 |
+| 폭탄 소지 중 사망 | `HandleDeath`가 `ReleaseCarriedBomb` + `DropAtCurrentLocation`을 호출. 폭탄을 소유한 상태로 죽게 되면 아무도 획득할 수 없음 |
+| Ragdoll 전환 | `EnterRagdoll` — Movement 비활성화, Capsule 충돌 해제, Mesh를 `SetAllBodiesSimulatePhysics(true)`로 물리 시뮬. `RagdollFreezeDelay`(기본 5초) 후 시뮬레이션 정지 |
+| 복제 | `bIsDead`(Replicated + `OnRep_IsDead`) — 서버는 `HandleDeath`에서, 클라이언트는 `OnRep_IsDead`에서 각각 Ragdoll 진입과 Delegate 브로드캐스트를 수행 |
+
+```cpp
+// UKiraverseAttributeSet::PostGameplayEffectExecute — 데미지 소비 직후 단일 지점에서 사망 판정
+if (DamageDone > 0.f)
+{
+    const float NewHealth = FMath::Clamp(GetHealth() - DamageDone, 0.f, GetMaxHealth());
+    SetHealth(NewHealth);
+
+    if (NewHealth <= 0.f)
+    {
+        AKiraverseCharacter* Victim = Cast<AKiraverseCharacter>(GetOwningActor());
+        AKiraverseCharacter* Killer = Cast<AKiraverseCharacter>(Data.EffectSpec.GetContext().GetOriginalInstigator());
+        Victim->HandleDeath(Killer);
+    }
+}
+```
+
+**킬캠** — `AKiraversePlayerController`가 서버에서 관전 대상을 결정하고, `Client RPC`(`ClientSetKillCamTarget`)로 뷰 타깃만 클라이언트에 전달합니다. 결정 로직 자체는 서버 권위로 유지하고, 클라이언트는 카메라 전환만 수행하는 구조입니다.
+
+```cpp
+void AKiraversePlayerController::BeginKillCam()
+{
+    TArray<AKiraverseCharacter*> Teammates;
+    GatherLivingTeammates(Teammates);   // 자신 제외, 같은 팀, 생존자만
+    if (Teammates.Num() == 0) { return; }
+
+    WatchedCharacter = Teammates[0];
+    ClientSetKillCamTarget(WatchedCharacter);  // Client RPC → SetViewTargetWithBlend
+}
+```
+
+관전 중인 팀원이 다시 사망하면 `OnWatchedCharacterDied`가 다음 생존자로 자동 전환하고, 입력(`CycleNextAction` / `CyclePreviousAction`)으로 생존 팀원 사이를 순환할 수 있습니다. 라운드가 재시작되면 `StartRound`가 새로 스폰된 자신의 폰으로 뷰 타깃을 명시적으로 되돌립니다(`EndKillCam(NewPawn)`).
+
+### 8. AI 봇 (Behavior Tree)
+
+`AKiraverseAIController`는 상태를 직접 들고 있지 않고 **Behavior Tree 실행 + 프레임 단위 조준**만 담당합니다. 의사결정은 전부 BT 노드 쪽으로 옮겨, 봇의 "무엇을 할지"와 "어떻게 실행할지"를 분리했습니다.
+
+```mermaid
+flowchart TB
+    Root["Root"] --> RA["Decorator: RoundActive"]
+    RA --> Sel["Selector"]
+    Sel --> Engage["Task: EngageTarget<br/>(TargetEnemy 존재 시)"]
+    Sel --> Channel["Task: BombChannel<br/>(Plant / Defuse)"]
+    Sel --> Pickup["Task: PickUpBomb<br/>(BombLoose)"]
+    Sel --> MoveSite["MoveTo: TargetSite<br/>(공격측, 폭탄 소지 중)"]
+    Sel --> Guard["Task: GuardBomb<br/>(GuardLocation)"]
+```
+
+| 노드 | 역할 |
+|---|---|
+| `BTService_UpdateWorldState` | 매 0.25초, 적/폭탄/사이트/위협 여부를 Blackboard에 기록. 폭탄 설치 후에는 NavMesh 위에서 **폭탄이 보이는** 엄호 위치를 봇 이름 기반 각도로 분산 계산 |
+| `BTDecorator_RoundActive` | 라운드가 `InProgress` / `BombPlanted`이고 봇이 생존 중일 때만 서브트리를 통과시킴. 조건이 바뀔 때만 `RequestExecution`을 호출(매 틱 강제 재평가 아님) |
+| `BTTask_EngageTarget` | 조준(`Controller->SetAimTarget`) + 사격. `AbortTask` / `OnTaskFinished`에서 무조건 발사 취소 — Abort된 태스크가 오토파이어를 계속 돌리는 상태로 남지 않도록 함 |
+| `BTTask_BombChannel` | Plant / Defuse 어빌리티 활성화 후 대기. 완료 여부는 어빌리티 내부 상태가 아니라 **폭탄의 실제 상태**(`Planted` / `Defused`)로 재검증 |
+| `BTTask_PickUpBomb` | `Ability.Bomb.PickUp` 활성화. 이미 소지 중이면 활성화하지 않음(같은 어빌리티가 소지/버리기를 토글하므로) |
+| `BTTask_GuardBomb` | 엄호 위치에서 정지, 폭탄 방향을 중심으로 Sine 곡선 시야 스캔(가장자리에서 머물고 중앙에서 빠르게 이동) |
+
+**조준** — 매 프레임 대상 위치를 다시 계산하되(추적을 부드럽게), 브레인 틱 주기로 새로 굴리는 오차(`AimErrorDegrees`)와 회전 속도 제한(`AimTurnRateDegrees`)을 더해 봇을 완벽한 조준으로 만들지 않습니다. `RerollAimError`가 오차만 갱신하고 방향 계산은 `UpdateControlRotation`이 매 프레임 새로 수행합니다.
+`SetAimTarget`(교전 중, 오차 있음)과 `SetLookLocation`(엄호 스캔 등 순수 시선, 오차 없음)은 서로 다른 API이며, `UpdateControlRotation`이 매 프레임 어느 쪽이 활성 상태인지 확인해 하나만 적용합니다 — `BTTask_GuardBomb`가 시야 스캔에 쓰는 것이 바로 `SetLookLocation` 쪽입니다.
+
+```cpp
+void AKiraverseAIController::UpdateControlRotation(float DeltaTime, bool bUpdatePawn)
+{
+    // 매 프레임 실제 방향을 재계산 → 오차 오프셋만 브레인 틱 주기로 재굴림
+    FRotator Desired = (Target->GetActorLocation() - ControlledPawn->GetPawnViewLocation()).Rotation();
+    Desired.Yaw += AimErrorOffset.Yaw;
+    Desired.Pitch += AimErrorOffset.Pitch;
+
+    const FRotator NewRotation = FMath::RInterpConstantTo(GetControlRotation(), Desired, DeltaTime, AimTurnRateDegrees);
+    SetControlRotation(NewRotation);
+}
+```
+
+**공유 조회 함수** — `BTService_UpdateWorldState` / `BTDecorator_RoundActive` / `BTTask_EngageTarget` / `BTTask_BombChannel` / `BTTask_GuardBomb` 다섯 노드가 공통으로 필요한 "적이 보이는가", "죽었는가", "채널링 중인가" 같은 판정은 `KiraverseAIQueries`(namespace)에 모아뒀습니다. 상태를 갖지 않는 순수 함수 모음이라 클래스 인스턴스가 필요 없고, `KiraverseGameplayTags`와 같은 방식을 그대로 따른 것입니다.
+
+**봇 스폰** — `AKiraverseGameMode::SpawnBots`가 `NumBotsPerTeam`(팀당, 기본 0)만큼 `BotControllerClass`를 `SpawnActor`로 생성합니다. 봇도 `AKiraversePlayerState`를 가지므로 `AssignTeams` / `StartRound` / `CheckWipeOut`이 사람 플레이어와 동일한 코드 경로로 처리합니다(`GetAllParticipants`가 `APlayerController`와 `AKiraverseAIController`를 함께 순회).
+
+#### Design Notes
+
+- BT 에셋(Blackboard 데이터 에셋 + Behavior Tree 에셋 조립)은 에디터 작업입니다. Blackboard 키 이름은 `KiraverseBlackboardKeys.h`의 상수와 정확히 일치해야 합니다.
+- `BTTask_BombChannel`은 채널 시작 시점에 대상 폭탄을 `TWeakObjectPtr`로 캐싱합니다 — 채널 도중 폭탄이 파괴(라운드 종료 등)되어도 결과 판정이 댕글링 포인터를 참조하지 않도록 하기 위함입니다.
+- `RagdollCollisionProfileName`(기본 `"Ragdoll"`)은 프로젝트에 해당 충돌 프로파일이 있어야 합니다.
+
+### 9. Replication 설계 요약
 
 | 관심사 | 전략 |
 |---|---|
 | ASC 복제 | `Mixed` 모드 — GameplayEffect는 소유 클라이언트에만, Gameplay Tag / Cue는 전체에 복제 |
 | 어빌리티 실행 | `LocalPredicted` — 소유 클라이언트가 예측 실행, 서버가 확정 |
 | 히트 판정 / 발사체 스폰 / 폭탄 상태 변경 | Authority(서버) 전용 (`HasAuthority()` 가드) |
-| 상태 동기화 | `CurrentWeapon`, `CarriedBomb`, `BombState`, `Team` — Replicated + RepNotify |
+| 상태 동기화 | `CurrentWeapon`, `CarriedBomb`, `BombState`, `Team`, `bIsDead` — Replicated + RepNotify |
 | 라운드 타이머 | 단계 전환 시 종료 시각(End Timestamp)을 1회 복제 |
 | Loose Gameplay Tag | 비복제이므로 복제되는 원본 상태(`Team`)로부터 각 머신이 로컬 부여 |
+| 킬캠 뷰 타깃 | 서버가 관전 대상을 결정(`AKiraversePlayerController`), `Client RPC`로 해당 클라이언트에만 뷰 타깃 전달 — 관전 로직 자체는 비복제 |
 
 ## 추가적인 에디터 작업
 C++만으로는 만들 수 없는 바이너리 에셋들입니다.
@@ -634,3 +767,14 @@ C++만으로는 만들 수 없는 바이너리 에셋들입니다.
    - `AKiraverseGameMode`를 상속하는 BP에서 `DefaultPawnClass`(`BP_KiraverseCharacter`), `GameStateClass`(`AKiraverseGameState`), `PlayerStateClass`(`AKiraversePlayerState`), `BombClass`, `BombPlantAbilityClass`, `BombDefuseAbilityClass`를 지정하고 GameMode Override로 사용합니다.
    - 라운드 튜닝: `RoundTimeLimit`(기본 120초), `RoundEndDelay`(기본 5초), GameState의 `ScoreToWinMatch`(기본 5).
    - 실제 Fuse 시간은 `GA_Bomb_Plant::BombFuseTime`(기본 45초)이 결정하므로, GameMode의 `BombFuseTime`과 같은 값으로 맞춰 둡니다.
+9. **사망 · 킬캠 세팅**
+   - `BP_KiraverseCharacter`에 `Ragdoll` 충돌 프로파일이 프로젝트 설정에 있는지 확인합니다(`RagdollCollisionProfileName`으로 이름 변경 가능).
+   - `BP_KiraversePlayerController`(`AKiraversePlayerController` 상속)를 만들고, GameMode BP의 `PlayerControllerClass`로 지정합니다.
+   - `IMC_KillCam`(Input Mapping Context)과 `IA_KillCamNext` / `IA_KillCamPrev`(Input Action)를 만들어 `KillCamMappingContext` / `CycleNextAction` / `CyclePreviousAction`에 연결합니다. 이 컨텍스트는 킬캠이 켜져 있을 때만 추가되므로, 평소 게임 플레이 키와 겹쳐도 됩니다.
+10. **AI 봇 세팅**
+   - Blackboard 데이터 에셋(`BB_Kiraverse`)을 만들고, `AI/KiraverseBlackboardKeys.h`의 상수와 **이름이 정확히 같은** 키를 등록합니다(`TargetEnemy`, `TargetSite`, `Bomb`, `GuardLocation`, `HasBomb`, `InPlantZone`, `BombPlanted`, `BombLoose`, `ThreatClose`, `IsChanneling`).
+   - Behavior Tree 에셋(`BT_Kiraverse`)을 만들고, 루트에 `Decorator: RoundActive` + `Service: UpdateWorldState`를 붙인 뒤, Selector 하위에 EngageTarget → BombChannel → PickUpBomb → (공격측 폭탄 소지 시 사이트로 MoveTo) → GuardBomb 순으로 우선순위를 배치합니다.
+   - `BP_KiraverseAIController`(`AKiraverseAIController` 상속)를 만들어 `BehaviorTreeAsset`에 `BT_Kiraverse`를 지정합니다.
+   - GameMode BP의 `NumBotsPerTeam`(팀당 봇 수, 기본 0)과 `BotControllerClass`(`BP_KiraverseAIController`)를 지정합니다.
+   - 레벨에 `NavMeshBoundsVolume`을 배치해야 봇이 이동할 수 있습니다.
+   - `Build.cs`에 `AIModule`, `NavigationSystem`, `GameplayTasks` 모듈을 추가합니다.

@@ -1,5 +1,6 @@
 #include "AbilitySystem/KiraverseAttributeSet.h"
 #include "GameplayEffectExtension.h"
+#include "Character/KiraverseCharacter.h"
 #include "Net/UnrealNetwork.h"
 
 UKiraverseAttributeSet::UKiraverseAttributeSet()
@@ -31,6 +32,18 @@ void UKiraverseAttributeSet::PostGameplayEffectExecute(const FGameplayEffectModC
 		{
 			const float NewHealth = FMath::Clamp(GetHealth() - DamageDone, 0.f, GetMaxHealth());
 			SetHealth(NewHealth);
+
+			// Death is decided here, on the server, at the single place damage becomes health loss.
+			if (NewHealth <= 0.f)
+			{
+				AKiraverseCharacter* Victim = Cast<AKiraverseCharacter>(GetOwningActor());
+				const FGameplayEffectContextHandle& Context = Data.EffectSpec.GetContext();
+				AKiraverseCharacter* Killer = Cast<AKiraverseCharacter>(Context.GetOriginalInstigator());
+				if (Victim)
+				{
+					Victim->HandleDeath(Killer);
+				}
+			}
 		}
 	}
 }

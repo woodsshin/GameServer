@@ -1,4 +1,5 @@
 # Portfolio
+> <a href="https://drive.google.com/file/d/16IJnSgvC1gbpW9DPIYUcXhM4bqG7w57o/view?usp=sharing" target="_blank"><b>📄 Download / View Full Portfolio (PDF)</b></a>
 
 A collection of projects centered on Network Programming and Game Engine Middleware. Each project is organized like an independent repository, and detailed implementation notes and verification results can be found via the links below.
 
@@ -11,7 +12,7 @@ A collection of projects centered on Network Programming and Game Engine Middlew
 | [Backend](./Backend/README_EN.md) | A collection of Go-based microservices making up the Icarus game backend. An independently deployed structure using RabbitMQ as a shared message bus | Go, RabbitMQ (AMQP/STOMP), Kubernetes, Redis, MySQL |
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README_EN.md) | A Native Code Plugin that wraps Epic Online Services in Unreal Engine's standard `OnlineSubsystem` interface | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README_EN.md) | A Native Code Plugin that automatically registers port forwarding on a router via the UPnP IGD protocol | Unreal Engine, C++, SSDP/SOAP |
-| [Kiraverse](./Kiraverse/README_EN.md) | A C++ multiplayer gameplay core built on Unreal Engine 5.4's Gameplay Ability System (GAS). Implements a Hitscan/Projectile weapon-swap architecture and a Bomb Defusal (plant/defuse) round loop | Unreal Engine, C++, Gameplay Ability System |
+| [Kiraverse](./Kiraverse/README_EN.md) | A C++ multiplayer gameplay core built on Unreal Engine 5.4's Gameplay Ability System (GAS). Implements a Hitscan/Projectile weapon-swap architecture and a Bomb Defusal (plant/defuse) round loop, Bot PvP | Unreal Engine, C++, Gameplay Ability System |
 
 ---
 
@@ -23,30 +24,29 @@ Among them, **OnlineSubsystemIcarus** and **Seedworld** represent two opposing p
 
 Finally, **Kiraverse** extends this scope beyond network infrastructure, showcasing the design of a server-authoritative combat core using Unreal Engine's Gameplay Ability System (GAS).
 
-```
-                    ┌─────────────────────────────────────────────────────────┐
-                    │              Establishing a Multiplayer Session           │
-                    └─────────────────────────────────────────────────────────┘
-                                      │
-        ┌─────────────────┬──────────┴──────────┬─────────────────────┐
-        ▼                 ▼                     ▼                     ▼
-  Custom Backend      Managed Server        Platform Backend      Network Transport
-  Integration          Scaling               Integration            (NAT Traversal)
- (Custom Protocol)    (AWS GameLift)        (Epic Service                │
-   ┌────┴────┐            │                  Integration)                │
-   ▼         ▼            ▼                     ▼                     ▼
-Backend  OnlineSubsystem  Seedworld        OnlineSubsystemEOS      SimpleUPNP
-Go        Icarus          Dedicated Server  Wraps EOS SDK          Auto-registers
-Microservices, WebSocket RPC +  + GameLift Fleet  in UE's           Port Mapping via
-RabbitMQ-  STOMP Lobby      Auto-scaling,      OnlineSubsystem,     UPnP IGD, achieving
-based       (UE Plugin      gRPC matchmaking   integrates EOS       P2P without a
-message bus  Client)        integration        P2P NAT Traversal    Relay server
+```mermaid
+flowchart TD
+    Root(["Establishing a Multiplayer Session"])
+
+    Root --> A["Custom Backend Integration<br/>(Custom Protocol)"]
+    Root --> B["Managed Server Scaling<br/>(AWS GameLift)"]
+    Root --> C["Platform Backend Integration<br/>(Epic Service Integration)"]
+    Root --> D["Network Transport<br/>(NAT Traversal)"]
+
+    A --> A1["Backend<br/>Go Microservice, RabbitMQ-based message bus"]
+    A --> A2["OnlineSubsystemIcarus<br/>WebSocket RPC + STOMP Lobby (UE Plugin)"]
+    B --> B1["Seedworld<br/>Dedicated Server + GameLift Fleet Auto-scaling, gRPC matchmaking integration"]
+    C --> C1["OnlineSubsystemEOS<br/>Wraps EOS SDK in UE's OnlineSubsystem, integrates EOS P2P NAT Traversal"]
+    D --> D1["SimpleUPNP<br/>Auto-registers Port Mapping via UPnP IGD, achieving P2P without a Relay server"]
+
+    A1 & A2 & B1 & C1 & D1 --> K(["Kiraverse<br/>Gameplay/Combat Logic(GAS, Server-authoritative) over established session"])
 ```
 
 - **Backend** and **OnlineSubsystemIcarus** form a matched server/client pair. Backend is the server side, combining several independent Go microservices via a RabbitMQ message bus, while OnlineSubsystemIcarus is the plugin — mounted on an Unreal Engine Dedicated Server/Client — that communicates with that backend over WebSocket (a custom framing protocol) plus STOMP Lobby Messaging. Because the wire protocol was designed and implemented on both the server and client sides, this is a complete example of custom backend integration that doesn't rely on a standard platform SDK, and it is a **P2P hosting** structure where the client itself doubles as the server.
 - **Seedworld is a Dedicated Server, while Icarus is a P2P hosting model.** Seedworld auto-scales an Unreal Engine Dedicated Server as an AWS GameLift fleet and handles server registration and player matching through a custom gRPC matchmaking backend (TurboLink). Instead of the client becoming the host, this is a **managed dedicated server** structure where GameLift manages fleet capacity per region, scaling server processes up or down as needed.
 - **OnlineSubsystemEOS** is a middleware layer mounted on an Unreal Engine Dedicated Server/Client that integrates Epic's backend services (authentication, session, matchmaking, P2P) into the engine's standard interface within the Unreal Engine ecosystem. It leverages EOS's own P2P NAT traversal and relay fallback.
-- **SimpleUPNP** is a plugin usable on both the Unreal Engine client and Dedicated Server. Using only a plain protocol (UPnP) — with no backend service — it opens a port directly on the router of the PC it's running on, offering a more fundamental (low-level) solution for establishing a fully relay-free P2P path.
+- **SimpleUPNP** is a plugin usable on both the Unreal Engine client and Dedicated Server. Using only a plain protocol (UPnP) with no backend service. It opens a port directly on the router of the PC it's running on, offering a more fundamental (low-level) solution for establishing a fully relay-free P2P path.
+- **Kiraverse** is the layer that structures and synchronizes the actual gameplay and combat logic such as GAS-based abilities, weapon swapping, and bomb defusal round loops, Bot PvP with the client on an established session under server authority.
 
 Through these five projects, the goal was to demonstrate an understanding of both the P2P and Dedicated Server models, the ability to implement distributed backend services alongside their corresponding client-side protocols, and problem-solving at the game engine middleware/network protocol level.
 

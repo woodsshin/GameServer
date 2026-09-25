@@ -13,6 +13,10 @@ class UKiraverseWeaponComponent;
 class UKiraverseBombComponent;
 class UInputMappingContext;
 class UInputAction;
+class AKiraverseCharacter;
+
+// Fired on every machine (server directly, clients via OnRep) the moment this character dies.
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FKiraverseCharacterDied, AKiraverseCharacter*, DeadCharacter, AKiraverseCharacter*, Killer);
 
 // Base character for Kiraverse: owns the ASC and binds Enhanced Input to ability tags.
 UCLASS()
@@ -32,6 +36,15 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Kiraverse")
 	UKiraverseBombComponent* GetBombComponent() const { return BombComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Kiraverse|Death")
+	bool IsDead() const { return bIsDead; }
+
+	// Authority only. Called by the attribute set when Health reaches 0. Idempotent.
+	void HandleDeath(AKiraverseCharacter* Killer);
+
+	UPROPERTY(BlueprintAssignable, Category = "Kiraverse|Death")
+	FKiraverseCharacterDied OnCharacterDied;
 
 protected:
 	virtual void PossessedBy(AController* NewController) override;
@@ -55,6 +68,12 @@ protected:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	//~ End AActor interface
 
+	UFUNCTION()
+	void OnRep_IsDead();
+
+	// Runs on every machine: disables movement/collision, releases the bomb tag state, and ragdolls the mesh.
+	void EnterRagdoll();
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Kiraverse|Abilities")
 	TObjectPtr<UAbilitySystemComponent> AbilitySystemComponent;
 
@@ -66,6 +85,17 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Kiraverse|Bomb")
 	TObjectPtr<UKiraverseBombComponent> BombComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, ReplicatedUsing = OnRep_IsDead, Category = "Kiraverse|Death")
+	bool bIsDead = false;
+
+	// Collision profile the mesh switches to while ragdolling; must collide with the world but not pawns.
+	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Death")
+	FName RagdollCollisionProfileName = TEXT("Ragdoll");
+
+	// Seconds after death before the ragdoll is frozen to save physics cost; 0 keeps it simulating.
+	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Death", meta = (ClampMin = "0"))
+	float RagdollFreezeDelay = 5.f;
 
 	// Jump/Dash/Zoom are granted here; Fire abilities are granted per-weapon by WeaponComponent.
 	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Abilities")
@@ -93,4 +123,7 @@ protected:
 	// Input for planting (attackers) or defusing (defenders) the bomb.
 	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Input")
 	TObjectPtr<UInputAction> BombActionAction;
+
+private:
+	FTimerHandle RagdollFreezeTimerHandle;
 };

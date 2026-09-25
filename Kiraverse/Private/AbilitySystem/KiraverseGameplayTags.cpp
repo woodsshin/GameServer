@@ -25,6 +25,7 @@ namespace KiraverseGameplayTags
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(State_Planting, "State.Planting", "Active while a plant channel is running.");
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(State_Defusing, "State.Defusing", "Active while a defuse channel is running.");
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(State_CarryingBomb, "State.CarryingBomb", "Active while this character holds the bomb.");
+	UE_DEFINE_GAMEPLAY_TAG_COMMENT(State_Dead, "State.Dead", "Granted on death; blocks every ability for the rest of the round.");
 
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Data_Damage, "Data.Damage", "SetByCaller key for runtime damage magnitude.");
 	UE_DEFINE_GAMEPLAY_TAG_COMMENT(Data_Cost_Ammo, "Data.Cost.Ammo", "SetByCaller key for per-shot ammo cost.");

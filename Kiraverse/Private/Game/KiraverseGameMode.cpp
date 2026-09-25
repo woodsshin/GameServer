@@ -6,10 +6,13 @@
 #include "AbilitySystem/Abilities/GA_Bomb_Plant.h"
 #include "AbilitySystem/Abilities/GA_Bomb_Defuse.h"
 #include "Character/KiraverseCharacter.h"
+#include "AI/KiraverseAIController.h"
+#include "Player/KiraversePlayerController.h"
 #include "AbilitySystemComponent.h"
 #include "GameFramework/PlayerController.h"
 #include "TimerManager.h"
 #include "Kismet/GameplayStatics.h"
+#include "EngineUtils.h"
 
 AKiraverseGameMode::AKiraverseGameMode()
 {
@@ -25,6 +28,7 @@ void AKiraverseGameMode::StartPlay()
 		CachedGameState->ResetScores();
 	}
 
+	SpawnBots();
 	AssignTeams();
 	StartRound();
 }
@@ -33,50 +37,99 @@ void AKiraverseGameMode::PostLogin(APlayerController* NewPlayer)
 {
 	Super::PostLogin(NewPlayer);
 
-	// A player joining mid-match still needs a team. NOTE: this assigns them to whichever side
-	// is currently smaller, but does NOT put them into the round already in progress as a bomb
-	// carrier candidate — GiveRandomAttackerTheBomb only runs at round start, so a joiner arrives
-	// as a normal attacker/defender and is eligible starting next round. This is a deliberate
-	// choice to avoid mid-round team-size churn affecting bomb-carrier odds; flagging in case a
-	// different mid-match join behavior is wanted.
+	// A joiner takes whichever side is smaller (bots included) and becomes bomb-eligible next round.
 	if (AKiraversePlayerState* PS = NewPlayer->GetPlayerState<AKiraversePlayerState>())
 	{
+		TArray<AController*> Participants;
+		GetAllParticipants(Participants);
+
 		int32 AttackerCount = 0;
 		int32 DefenderCount = 0;
-		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+		for (const AController* Other : Participants)
 		{
-			if (const AKiraversePlayerState* OtherPS = It->Get() ? It->Get()->GetPlayerState<AKiraversePlayerState>() : nullptr)
+			const AKiraversePlayerState* OtherPS = Other->GetPlayerState<AKiraversePlayerState>();
+			if (!OtherPS || OtherPS == PS)
 			{
-				if (OtherPS == PS)
-				{
-					continue;
-				}
-				if (OtherPS->GetTeam() == ETeam::Attackers) { ++AttackerCount; }
-				else if (OtherPS->GetTeam() == ETeam::Defenders) { ++DefenderCount; }
+				continue;
 			}
+			if (OtherPS->GetTeam() == ETeam::Attackers) { ++AttackerCount; }
+			else if (OtherPS->GetTeam() == ETeam::Defenders) { ++DefenderCount; }
 		}
 		PS->SetTeam(AttackerCount <= DefenderCount ? ETeam::Attackers : ETeam::Defenders);
 	}
 }
 
-void AKiraverseGameMode::AssignTeams()
+void AKiraverseGameMode::GetAllParticipants(TArray<AController*>& OutControllers) const
 {
-	// One-time even split at match start. Sides are NOT swapped between rounds by this GameMode —
-	// the task summary specifies team assignment and round win/loss but not attacker/defender
-	// side-swap, so that's left out rather than assumed. Easy to add in EndRound if wanted: swap
-	// each AKiraversePlayerState's team right before the next StartRound() call.
-	TArray<APlayerController*> Controllers;
+	OutControllers.Reset();
+
+	// Humans first, then bots, so AssignTeams alternation spreads humans across both sides.
 	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
 	{
 		if (APlayerController* PC = It->Get())
 		{
-			Controllers.Add(PC);
+			OutControllers.Add(PC);
 		}
 	}
 
-	for (int32 Index = 0; Index < Controllers.Num(); ++Index)
+	for (TActorIterator<AKiraverseAIController> It(GetWorld()); It; ++It)
 	{
-		if (AKiraversePlayerState* PS = Controllers[Index]->GetPlayerState<AKiraversePlayerState>())
+		OutControllers.Add(*It);
+	}
+}
+
+void AKiraverseGameMode::SpawnBots()
+{
+	if (!HasAuthority() || NumBotsPerTeam <= 0 || !GetWorld())
+	{
+		return;
+	}
+
+	if (!BotControllerClass)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("KiraverseGameMode: NumBotsPerTeam > 0 but BotControllerClass is not set; no bots spawned."));
+		return;
+	}
+
+	const int32 TotalBots = NumBotsPerTeam * 2;
+	for (int32 Index = 0; Index < TotalBots; ++Index)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		AKiraverseAIController* BotController = GetWorld()->SpawnActor<AKiraverseAIController>(BotControllerClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+		if (!BotController)
+		{
+			continue;
+		}
+
+		// SpawnActor doesn't go through the login path that normally creates a PlayerState, so make one explicitly.
+		if (!BotController->PlayerState)
+		{
+			BotController->InitPlayerState();
+		}
+		if (BotController->PlayerState)
+		{
+			BotController->PlayerState->SetPlayerName(FString::Printf(TEXT("Bot_%d"), Index + 1));
+		}
+
+		// A bot whose PlayerState isn't AKiraversePlayerState never gets a team and idles forever, so surface it.
+		if (!BotController->GetPlayerState<AKiraversePlayerState>())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("KiraverseGameMode: bot %s has no AKiraversePlayerState; set the GameMode's PlayerStateClass."), *GetNameSafe(BotController));
+		}
+	}
+}
+
+void AKiraverseGameMode::AssignTeams()
+{
+	// One-time even split at match start; sides are never swapped between rounds, and humans are listed first so they spread across both sides.
+	TArray<AController*> Participants;
+	GetAllParticipants(Participants);
+
+	for (int32 Index = 0; Index < Participants.Num(); ++Index)
+	{
+		if (AKiraversePlayerState* PS = Participants[Index]->GetPlayerState<AKiraversePlayerState>())
 		{
 			PS->SetTeam((Index % 2 == 0) ? ETeam::Attackers : ETeam::Defenders);
 		}
@@ -106,21 +159,43 @@ void AKiraverseGameMode::StartRound()
 		return;
 	}
 
-	ActiveBomb = nullptr;
-
-	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	// Remove last round's bomb, unbinding first so its fuse can never end a later round.
+	if (ActiveBomb)
 	{
-		APlayerController* PC = It->Get();
-		if (!PC)
-		{
-			continue;
-		}
-		RestartPlayer(PC);
-		ReapplyTeamTagForPlayer(PC);
+		ActiveBomb->OnPlanted.RemoveAll(this);
+		ActiveBomb->OnExploded.RemoveAll(this);
+		ActiveBomb->OnDefused.RemoveAll(this);
+		ActiveBomb->Destroy();
+		ActiveBomb = nullptr;
+	}
 
-		if (AKiraverseCharacter* Character = Cast<AKiraverseCharacter>(PC->GetPawn()))
+	TArray<AController*> Participants;
+	GetAllParticipants(Participants);
+
+	for (AController* Controller : Participants)
+	{
+		// Drop last round's pawn so RestartPlayer always spawns a fresh one with reset attributes.
+		if (APawn* OldPawn = Controller->GetPawn())
 		{
-			const AKiraversePlayerState* PS = PC->GetPlayerState<AKiraversePlayerState>();
+			Controller->UnPossess();
+			OldPawn->Destroy();
+		}
+
+		RestartPlayer(Controller);
+		ReapplyTeamTagForPlayer(Controller);
+
+		// The new pawn exists now, so the camera can be sent straight to it instead of lingering on a teammate.
+		if (AKiraversePlayerController* HumanController = Cast<AKiraversePlayerController>(Controller))
+		{
+			HumanController->EndKillCam(HumanController->GetPawn());
+		}
+
+		if (AKiraverseCharacter* Character = Cast<AKiraverseCharacter>(Controller->GetPawn()))
+		{
+			// Characters are new every round, so the binding is always fresh; AddUniqueDynamic guards a stray double call.
+			Character->OnCharacterDied.AddUniqueDynamic(this, &AKiraverseGameMode::HandleCharacterDied);
+
+			const AKiraversePlayerState* PS = Controller->GetPlayerState<AKiraversePlayerState>();
 			if (PS)
 			{
 				GrantTeamBombAbility(Character, PS->GetTeam());
@@ -128,14 +203,9 @@ void AKiraverseGameMode::StartRound()
 		}
 		else
 		{
-			// RestartPlayer should synchronously produce an AKiraverseCharacter pawn (PossessedBy
-			// runs inside Possess(), called inside RestartPlayer, before it returns — see
-			// AKiraverseCharacter::PossessedBy). Landing here means either DefaultPawnClass isn't
-			// an AKiraverseCharacter subclass, or RestartPlayer failed to spawn/possess at all.
-			// Either way this player gets no Plant/Defuse ability for the round; logging it since
-			// it would otherwise fail completely silently.
+			// RestartPlayer runs PossessedBy synchronously, so a missing pawn means a bad DefaultPawnClass or no PlayerStart.
 			UE_LOG(LogTemp, Warning, TEXT("KiraverseGameMode: %s has no AKiraverseCharacter pawn after RestartPlayer; bomb ability not granted this round."),
-				*GetNameSafe(PC));
+				*GetNameSafe(Controller));
 		}
 	}
 
@@ -189,12 +259,14 @@ void AKiraverseGameMode::GiveRandomAttackerTheBomb()
 		return;
 	}
 
+	TArray<AController*> Participants;
+	GetAllParticipants(Participants);
+
 	TArray<AKiraverseCharacter*> Attackers;
-	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	for (const AController* Controller : Participants)
 	{
-		const APlayerController* PC = It->Get();
-		const AKiraversePlayerState* PS = PC ? PC->GetPlayerState<AKiraversePlayerState>() : nullptr;
-		AKiraverseCharacter* Character = PC ? Cast<AKiraverseCharacter>(PC->GetPawn()) : nullptr;
+		const AKiraversePlayerState* PS = Controller->GetPlayerState<AKiraversePlayerState>();
+		AKiraverseCharacter* Character = Cast<AKiraverseCharacter>(Controller->GetPawn());
 		if (PS && Character && PS->GetTeam() == ETeam::Attackers)
 		{
 			Attackers.Add(Character);
@@ -265,9 +337,87 @@ void AKiraverseGameMode::HandleBombDefused()
 	EndRound(ETeam::Defenders);
 }
 
-void AKiraverseGameMode::EndRound(ETeam WinningTeam)
+int32 AKiraverseGameMode::CountLivingOnTeam(ETeam Team) const
+{
+	TArray<AController*> Participants;
+	GetAllParticipants(Participants);
+
+	int32 Living = 0;
+	for (const AController* Controller : Participants)
+	{
+		const AKiraversePlayerState* PS = Controller->GetPlayerState<AKiraversePlayerState>();
+		const AKiraverseCharacter* Character = Cast<AKiraverseCharacter>(Controller->GetPawn());
+		if (PS && PS->GetTeam() == Team && Character && !Character->IsDead())
+		{
+			++Living;
+		}
+	}
+	return Living;
+}
+
+void AKiraverseGameMode::CheckWipeOut()
 {
 	if (!CachedGameState)
+	{
+		return;
+	}
+
+	const ERoundState RoundState = CachedGameState->GetRoundState();
+	if (RoundState != ERoundState::InProgress && RoundState != ERoundState::BombPlanted)
+	{
+		return;
+	}
+
+	// Defenders wiped out always hands attackers the round, planted or not.
+	if (CountLivingOnTeam(ETeam::Defenders) == 0)
+	{
+		EndRound(ETeam::Attackers);
+		return;
+	}
+
+	// Attackers wiped out only loses the round if the bomb is not planted; once planted, the fuse decides.
+	if (RoundState == ERoundState::InProgress && CountLivingOnTeam(ETeam::Attackers) == 0)
+	{
+		EndRound(ETeam::Defenders);
+	}
+}
+
+void AKiraverseGameMode::HandleCharacterDied(AKiraverseCharacter* DeadCharacter, AKiraverseCharacter* Killer)
+{
+	if (!HasAuthority() || !DeadCharacter)
+	{
+		return;
+	}
+
+	TArray<AController*> Participants;
+	GetAllParticipants(Participants);
+
+	// Every human either starts watching a teammate (if this was their own pawn) or re-targets (if they were watching the victim).
+	for (AController* Controller : Participants)
+	{
+		AKiraversePlayerController* HumanController = Cast<AKiraversePlayerController>(Controller);
+		if (!HumanController)
+		{
+			continue;
+		}
+
+		if (HumanController->GetPawn() == DeadCharacter)
+		{
+			HumanController->BeginKillCam();
+		}
+		else
+		{
+			HumanController->OnWatchedCharacterDied(DeadCharacter);
+		}
+	}
+
+	CheckWipeOut();
+}
+
+void AKiraverseGameMode::EndRound(ETeam WinningTeam)
+{
+	// Timeout, explosion, defuse and wipe-out can race in one frame; only the first result counts.
+	if (!CachedGameState || CachedGameState->GetRoundState() == ERoundState::RoundEnded)
 	{
 		return;
 	}

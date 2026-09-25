@@ -8,6 +8,8 @@
 class AKiraverseBomb;
 class AKiraverseCharacter;
 class AKiraverseGameState;
+class AKiraverseAIController;
+class AKiraversePlayerController;
 class UGA_Bomb_Plant;
 class UGA_Bomb_Defuse;
 
@@ -38,7 +40,23 @@ public:
 	UFUNCTION()
 	void HandleBombDefused();
 
+	// Bound to every character's OnCharacterDied at round start; drives kill cam and wipe-out round ending.
+	UFUNCTION()
+	void HandleCharacterDied(AKiraverseCharacter* DeadCharacter, AKiraverseCharacter* Killer);
+
 protected:
+	// Spawns NumBotsPerTeam AI controllers per side at match start; each gets its own PlayerState.
+	void SpawnBots();
+
+	// Counts living characters on a team; dead ones and pawn-less controllers do not count.
+	int32 CountLivingOnTeam(ETeam Team) const;
+
+	// Ends the round if a death just wiped out a team, applying the plant-state rules.
+	void CheckWipeOut();
+
+	// Every controller that owns a Kiraverse PlayerState, human or bot, so round logic treats both alike.
+	void GetAllParticipants(TArray<AController*>& OutControllers) const;
+
 	// --- Round flow, in call order ---
 	void AssignTeams();
 	void StartRound();
@@ -95,6 +113,13 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Bomb")
 	TSubclassOf<UGA_Bomb_Defuse> BombDefuseAbilityClass;
+
+	// Bots added to EACH team at match start (0 disables bots). Total bots = 2 * this value.
+	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Bot", meta = (ClampMin = "0"))
+	int32 NumBotsPerTeam = 0;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Kiraverse|Bot")
+	TSubclassOf<AKiraverseAIController> BotControllerClass;
 
 	UPROPERTY()
 	TObjectPtr<AKiraverseGameState> CachedGameState;

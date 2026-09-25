@@ -39,6 +39,9 @@ namespace KiraverseGameplayTags
 	// Active while this character is carrying the bomb.
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_CarryingBomb);
 
+	// Granted on death; blocks every ability and marks the character as out of the round.
+	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Dead);
+
 	// SetByCaller keys: magnitudes injected at runtime by the firing ability.
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(Data_Damage);
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(Data_Cost_Ammo);

@@ -46,6 +46,20 @@ Source/Kiraverse/
    │     └─ DamageExecCalculation.*    Writes the SetByCaller damage to the Damage attribute
    ├─ Character/
    │  └─ KiraverseCharacter.*          Owns the ASC; Enhanced Input → tag-based ability activation
+   │                                   Death handling (HandleDeath) · ragdoll transition · OnCharacterDied delegate
+   ├─ Player/
+   │  └─ KiraversePlayerController.*   Kill cam (spectate a living teammate); server-authoritative, view target applied via Client RPC
+   ├─ AI/
+   │  ├─ KiraverseAIController.*       Runs the behavior tree + per-frame aiming (error and turn-rate smoothing)
+   │  ├─ KiraverseAIQueries.*          Stateless world queries shared by BT nodes (namespace)
+   │  ├─ KiraverseBlackboardKeys.h     Blackboard key name constants
+   │  └─ BehaviorTree/
+   │     ├─ BTService_UpdateWorldState.*  Writes enemy/bomb/site/threat facts to the blackboard
+   │     ├─ BTDecorator_RoundActive.*     Passes the subtree only while the round is active and the bot is alive
+   │     ├─ BTTask_EngageTarget.*         Aim + fire (guarantees firing is cancelled on abort)
+   │     ├─ BTTask_BombChannel.*          Runs the Plant / Defuse channel; outcome re-verified from bomb state
+   │     ├─ BTTask_PickUpBomb.*           Picks up the bomb
+   │     └─ BTTask_GuardBomb.*            Guards a planted bomb + sine-sweep sight scan
    ├─ Weapon/
    │  ├─ KiraverseWeaponBase.*         Pure virtual Fire() + weapon data (FireAbilityClass, etc.)
    │  ├─ KiraverseWeapon_Hitscan.*     Line trace
@@ -385,8 +399,11 @@ stateDiagram-v2
     WaitingToStart --> InProgress : StartRound
     InProgress --> BombPlanted : OnPlanted
     InProgress --> RoundEnded : Round timeout / Defenders +1
+    InProgress --> RoundEnded : Attackers wiped out / Defenders +1
     BombPlanted --> RoundEnded : OnDefused / Defenders +1
     BombPlanted --> RoundEnded : OnExploded / Attackers +1
+    BombPlanted --> RoundEnded : Defenders wiped out / Attackers +1
+    InProgress --> RoundEnded : Defenders wiped out / Attackers +1
     RoundEnded --> InProgress : StartRound after RoundEndDelay
 ```
 
@@ -403,7 +420,8 @@ stateDiagram-v2
 
 **Round flow** — `StartPlay` → `AssignTeams` (split evenly by index parity) → `StartRound`.
 `StartRound` proceeds in this order: restart the players, re-apply Team tags, grant the team-specific Plant / Defuse ability, hand the bomb to one randomly chosen attacker, and start the round timer.
-The end conditions are ① the bomb is not planted within the time limit → defenders win, ② the bomb explodes → attackers win, ③ the bomb is defused → defenders win.
+The end conditions are ① the bomb is not planted within the time limit → defenders win, ② the bomb explodes → attackers win, ③ the bomb is defused → defenders win, ④ a team is wiped out → the other side wins.
+④ is evaluated by `CheckWipeOut` every time `AKiraverseCharacter::OnCharacterDied` fires — defenders wiped out always wins it for attackers regardless of plant state, while attackers wiped out only wins it for defenders before the bomb is planted (once planted, the fuse/defuse outcome decides instead). See section 7 for details.
 
 #### 6.1 Decoupling via Events (Observer)
 
@@ -598,16 +616,131 @@ When the bomb is planted, the bomb's `FuseEndTime` is mirrored into the same fie
 - `BombFuseTime` is also kept on the ability so that the Plant / Defuse abilities do not reference the GameMode. The trade-off is that the two values must be kept in sync, in exchange for lower coupling.
 - A player who joins mid-round (`PostLogin`) is assigned to the team with fewer players and becomes eligible as a bomb carrier from the next round.
 
-### 7. Replication Design Summary
+### 7. Death Handling · Ragdoll · Kill Cam
+
+Health reaching zero is judged in **one place only** — `AttributeSet::PostGameplayEffectExecute`, right where `Damage` is folded into `Health` — so `death` as an event can never fire twice through separate paths.
+
+```mermaid
+sequenceDiagram
+    participant AS as AttributeSet
+    participant Char as KiraverseCharacter
+    participant PC as PlayerController
+    participant GM as GameMode
+
+    AS->>AS: NewHealth <= 0
+    AS->>Char: HandleDeath(Killer)
+    Char->>Char: CancelAllAbilities + grant State.Dead
+    Char->>Char: If carrying the bomb, Release + Drop
+    Char->>Char: EnterRagdoll (disable movement/collision, simulate physics)
+    Char-->>Char: OnCharacterDied.Broadcast (server) / OnRep_IsDead (client)
+    Char->>GM: OnCharacterDied
+    GM->>PC: Victim's own controller → BeginKillCam
+    GM->>PC: Every other controller → OnWatchedCharacterDied (re-target if needed)
+    GM->>GM: CheckWipeOut
+```
+
+| Concern | Implementation |
+|---|---|
+| Where death is judged | `UKiraverseAttributeSet::PostGameplayEffectExecute` — right after `Damage` is consumed, judged once if `Health <= 0` |
+| Identifying the killer | `FGameplayEffectContextHandle::GetOriginalInstigator()` (both Hitscan and Projectile set this via `AddInstigator(Shooter, ...)`) |
+| Blocking abilities | `State.Dead` is blocked via `ActivationBlockedTags` on the shared base (`UKiraverseGameplayAbility`) — no subclass needs to block it individually |
+| Dying while carrying the bomb | `HandleDeath` calls `ReleaseCarriedBomb` + `DropAtCurrentLocation` — If a player dies possessing the bomb, it becomes unobtainable. |
+| Ragdoll transition | `EnterRagdoll` — disables movement, disables capsule collision, sets the mesh to `SetAllBodiesSimulatePhysics(true)`. Simulation stops after `RagdollFreezeDelay` (default 5s) |
+| Replication | `bIsDead` (Replicated + `OnRep_IsDead`) — the server enters ragdoll and broadcasts from `HandleDeath`, clients do the same from `OnRep_IsDead` |
+
+```cpp
+// UKiraverseAttributeSet::PostGameplayEffectExecute — death is judged in one place, right after damage is consumed
+if (DamageDone > 0.f)
+{
+    const float NewHealth = FMath::Clamp(GetHealth() - DamageDone, 0.f, GetMaxHealth());
+    SetHealth(NewHealth);
+
+    if (NewHealth <= 0.f)
+    {
+        AKiraverseCharacter* Victim = Cast<AKiraverseCharacter>(GetOwningActor());
+        AKiraverseCharacter* Killer = Cast<AKiraverseCharacter>(Data.EffectSpec.GetContext().GetOriginalInstigator());
+        Victim->HandleDeath(Killer);
+    }
+}
+```
+
+**Kill cam** — `AKiraversePlayerController` decides who to spectate on the server, then forwards only the resulting view target to the client via `Client RPC` (`ClientSetKillCamTarget`). The decision itself stays server-authoritative; the client's job is only to switch the camera.
+
+```cpp
+void AKiraversePlayerController::BeginKillCam()
+{
+    TArray<AKiraverseCharacter*> Teammates;
+    GatherLivingTeammates(Teammates);   // excludes self, same team, living only
+    if (Teammates.Num() == 0) { return; }
+
+    WatchedCharacter = Teammates[0];
+    ClientSetKillCamTarget(WatchedCharacter);  // Client RPC → SetViewTargetWithBlend
+}
+```
+
+If the teammate being watched also dies, `OnWatchedCharacterDied` automatically switches to the next living teammate, and input (`CycleNextAction` / `CyclePreviousAction`) lets the player cycle between living teammates manually. When the round restarts, `StartRound` explicitly returns the view target to the player's own newly spawned pawn (`EndKillCam(NewPawn)`).
+
+### 8. AI Bots (Behavior Tree)
+
+`AKiraverseAIController` holds no decision-making state of its own — it only **runs the behavior tree and owns per-frame aiming**. Every decision lives in the BT nodes instead, separating "what the bot should do" from "how that gets executed".
+
+```mermaid
+flowchart TB
+    Root["Root"] --> RA["Decorator: RoundActive"]
+    RA --> Sel["Selector"]
+    Sel --> Engage["Task: EngageTarget<br/>(when TargetEnemy exists)"]
+    Sel --> Channel["Task: BombChannel<br/>(Plant / Defuse)"]
+    Sel --> Pickup["Task: PickUpBomb<br/>(BombLoose)"]
+    Sel --> MoveSite["MoveTo: TargetSite<br/>(attacker carrying the bomb)"]
+    Sel --> Guard["Task: GuardBomb<br/>(GuardLocation)"]
+```
+
+| Node | Role |
+|---|---|
+| `BTService_UpdateWorldState` | Every 0.25s, writes enemy/bomb/site/threat facts to the blackboard. Once the bomb is planted, it also computes a guard position with a **clear line of sight to the bomb** on the NavMesh, spread across bots by a name-derived angle |
+| `BTDecorator_RoundActive` | Only passes the subtree while the round is `InProgress` / `BombPlanted` and the bot is alive. Calls `RequestExecution` only when the condition changes, not on every tick |
+| `BTTask_EngageTarget` | Aims (`Controller->SetAimTarget`) and fires. `AbortTask` / `OnTaskFinished` cancel firing unconditionally, so an aborted task can never leave auto-fire running in the background |
+| `BTTask_BombChannel` | Activates the Plant / Defuse ability and waits. Completion is judged not from the ability's internal state but from the **bomb's actual resulting state** (`Planted` / `Defused`) |
+| `BTTask_PickUpBomb` | Activates `Ability.Bomb.PickUp`. Does nothing if already carrying (the same ability toggles pick-up and drop) |
+| `BTTask_GuardBomb` | Holds position at the guard spot and sweeps its view in a sine curve centered on the bomb's direction — dwelling at the edges, moving fastest through the middle |
+
+**Aiming** — the direction to the target is recomputed every frame (so tracking stays smooth), with a random error (`AimErrorDegrees`) re-rolled on the brain-tick cadence and a turn-rate cap (`AimTurnRateDegrees`) added on top, so bots are never perfectly accurate. `RerollAimError` only refreshes the error; the direction itself is recomputed every frame inside `UpdateControlRotation`.
+`SetAimTarget` (engaging, with error) and `SetLookLocation` (passive looking, e.g. guard scanning, no error) are separate APIs, and `UpdateControlRotation` checks which one is active each frame and applies only that one — `BTTask_GuardBomb`'s sight scan is what drives the `SetLookLocation` path.
+
+```cpp
+void AKiraverseAIController::UpdateControlRotation(float DeltaTime, bool bUpdatePawn)
+{
+    // Direction is recomputed every frame; only the error offset is re-rolled on the brain-tick cadence
+    FRotator Desired = (Target->GetActorLocation() - ControlledPawn->GetPawnViewLocation()).Rotation();
+    Desired.Yaw += AimErrorOffset.Yaw;
+    Desired.Pitch += AimErrorOffset.Pitch;
+
+    const FRotator NewRotation = FMath::RInterpConstantTo(GetControlRotation(), Desired, DeltaTime, AimTurnRateDegrees);
+    SetControlRotation(NewRotation);
+}
+```
+
+**Shared queries** — the world-state checks five nodes need in common (`BTService_UpdateWorldState` / `BTDecorator_RoundActive` / `BTTask_EngageTarget` / `BTTask_BombChannel` / `BTTask_GuardBomb`), such as "is an enemy visible", "is this character dead", "is a channel running", live in `KiraverseAIQueries` (a namespace). It's a stateless collection of pure functions, so no class instance is needed — the same shape `KiraverseGameplayTags` already uses in this codebase.
+
+**Spawning bots** — `AKiraverseGameMode::SpawnBots` spawns `NumBotsPerTeam` (per side, default 0) `BotControllerClass` instances via `SpawnActor`. Bots also own an `AKiraversePlayerState`, so `AssignTeams` / `StartRound` / `CheckWipeOut` handle them through the exact same code path as human players (`GetAllParticipants` iterates `APlayerController` and `AKiraverseAIController` together).
+
+#### Design Notes
+
+- The BT assets (assembling the Blackboard data asset and the Behavior Tree asset) are editor work. Blackboard key names must match the constants in `KiraverseBlackboardKeys.h` exactly.
+- `BTTask_BombChannel` caches the target bomb as a `TWeakObjectPtr` at the moment the channel starts — so that if the bomb is destroyed mid-channel (e.g. the round ends), the outcome check never dereferences a dangling pointer.
+- `RagdollCollisionProfileName` (default `"Ragdoll"`) must exist as a collision profile in the project.
+
+### 9. Replication Design Summary
 
 | Concern | Strategy |
 |---|---|
 | ASC replication | `Mixed` mode — GameplayEffects replicate to the owning client only; Gameplay Tags / Cues replicate to everyone |
 | Ability execution | `LocalPredicted` — the owning client predicts execution and the server confirms |
 | Hit detection / projectile spawning / bomb state changes | Authority (server) only (`HasAuthority()` guard) |
-| State synchronization | `CurrentWeapon`, `CarriedBomb`, `BombState`, `Team` — Replicated + RepNotify |
+| State synchronization | `CurrentWeapon`, `CarriedBomb`, `BombState`, `Team`, `bIsDead` — Replicated + RepNotify |
 | Round timer | End timestamp replicated once per phase transition |
 | Loose Gameplay Tag | Not replicated, so each machine grants it locally from the replicated source-of-truth state (`Team`) |
+| Kill cam view target | The server decides who to spectate (`AKiraversePlayerController`), then forwards it to that one client via `Client RPC` — the spectating logic itself is not replicated |
 
 ## Additional Editor Work
 These are binary assets that cannot be created with C++ alone.
@@ -634,3 +767,14 @@ These are binary assets that cannot be created with C++ alone.
    - In a BP that inherits `AKiraverseGameMode`, set `DefaultPawnClass` (`BP_KiraverseCharacter`), `GameStateClass` (`AKiraverseGameState`), `PlayerStateClass` (`AKiraversePlayerState`), `BombClass`, `BombPlantAbilityClass`, and `BombDefuseAbilityClass`, and use it as the GameMode Override.
    - Round tuning: `RoundTimeLimit` (default 120 seconds), `RoundEndDelay` (default 5 seconds), and the GameState's `ScoreToWinMatch` (default 5).
    - The actual fuse time is determined by `GA_Bomb_Plant::BombFuseTime` (default 45 seconds), so keep it at the same value as the GameMode's `BombFuseTime`.
+9. **Death and kill cam setup**
+   - Confirm `BP_KiraverseCharacter`'s `Ragdoll` collision profile exists in the project settings (renameable via `RagdollCollisionProfileName`).
+   - Create `BP_KiraversePlayerController` (inherits `AKiraversePlayerController`) and set it as the GameMode BP's `PlayerControllerClass`.
+   - Create `IMC_KillCam` (Input Mapping Context) and `IA_KillCamNext` / `IA_KillCamPrev` (Input Actions), then connect them to `KillCamMappingContext` / `CycleNextAction` / `CyclePreviousAction`. This context is only added while the kill cam is active, so it's safe even if the keys overlap with normal gameplay bindings.
+10. **AI bot setup**
+   - Create a Blackboard data asset (`BB_Kiraverse`) and register keys whose names **exactly match** the constants in `AI/KiraverseBlackboardKeys.h` (`TargetEnemy`, `TargetSite`, `Bomb`, `GuardLocation`, `HasBomb`, `InPlantZone`, `BombPlanted`, `BombLoose`, `ThreatClose`, `IsChanneling`).
+   - Create a Behavior Tree asset (`BT_Kiraverse`), attach `Decorator: RoundActive` + `Service: UpdateWorldState` to the root, and under the Selector order the priority as EngageTarget → BombChannel → PickUpBomb → (MoveTo the site, for an attacker carrying the bomb) → GuardBomb.
+   - Create `BP_KiraverseAIController` (inherits `AKiraverseAIController`) and set `BehaviorTreeAsset` to `BT_Kiraverse`.
+   - Set the GameMode BP's `NumBotsPerTeam` (bots per side, default 0) and `BotControllerClass` (`BP_KiraverseAIController`).
+   - Place a `NavMeshBoundsVolume` in the level, or bots cannot move.
+   - Add the `AIModule`, `NavigationSystem`, and `GameplayTasks` modules to `Build.cs`.

@@ -1,4 +1,5 @@
 # Portfolio
+> <a href="https://drive.google.com/file/d/1GoUnWiCkAd1RMs37GINjFdI8AssyieZi/view?usp=drive_link" target="_blank"><b>📄 다운로드 / 전체 포트폴리오 보기 (PDF)</b></a>
 
 Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 모음입니다. 각 프로젝트는 독립된 Repository처럼 구성되어 있으며, 하단 링크에서 세부 구현과 검증 결과를 확인할 수 있습니다.
 
@@ -11,7 +12,7 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 | [Backend](./Backend/README.md) | Icarus 게임 백엔드를 구성하는 Go 기반 microservice 모음. RabbitMQ를 공용 message bus로 사용하는 독립 배포 구조 | Go, RabbitMQ(AMQP/STOMP), Kubernetes, Redis, MySQL |
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README.md) | Epic Online Services를 Unreal Engine의 표준 `OnlineSubsystem` Interface로 wrapping한 Native Code Plugin | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
-| [Kiraverse](./Kiraverse/README.md) | Unreal Engine 5.4의 Gameplay Ability System(GAS) 기반 C++ 멀티플레이어 게임플레이 코어. Hitscan/Projectile 무기 교체 구조와 폭탄 설치·해체(Bomb Defusal) 라운드 루프 구현 | Unreal Engine, C++, Gameplay Ability System |
+| [Kiraverse](./Kiraverse/README.md) | Unreal Engine 5.4의 Gameplay Ability System(GAS) 기반 C++ 멀티플레이어 게임플레이 코어. Hitscan/Projectile 무기 교체 구조와 폭탄 설치·해체(Bomb Defusal) 라운드 루프, 봇 PvP 구현 | Unreal Engine, C++, Gameplay Ability System |
 
 ---
 
@@ -23,30 +24,29 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 
 마지막으로 **Kiraverse**는 네트워크 인프라 영역을 넘어, 언리얼 엔진의 Gameplay Ability System(GAS)을 기반으로 한 서버 권위(Server-Authoritative) 전투 코어 설계 방식을 보여줍니다.
 
-```
-                    ┌─────────────────────────────────────────────────────────┐
-                    │                Multiplayer Session 성립                  │
-                    └─────────────────────────────────────────────────────────┘
-                                      │
-        ┌─────────────────┬──────────┴──────────┬─────────────────────┐
-        ▼                 ▼                     ▼                     ▼
-  Custom Backend      Managed Server        Platform Backend      Network Transport
-  Integration          Scaling               Integration            (NAT Traversal)
- (자체 Protocol)      (AWS GameLift)        (Epic Service 통합)          │
-   ┌────┴────┐            │                     │                     │
-   ▼         ▼            ▼                     ▼                     ▼
-Backend  OnlineSubsystem  Seedworld        OnlineSubsystemEOS      SimpleUPNP
-Go        Icarus          Dedicated Server  EOS SDK를 UE           UPnP IGD로 Router에
-Microservice, WebSocket RPC +  + GameLift Fleet   OnlineSubsystem으로   Port Mapping을 자동
-RabbitMQ    STOMP Lobby      Auto-scaling,      wrapping,            등록, Relay 서버
-기반         Client(UE       gRPC 매치메이킹     EOS P2P NAT           없이 P2P 성립
-메시지 버스   Plugin)         연동               Traversal 통합
+```mermaid
+flowchart TD
+    Root(["Multiplayer Session 성립"])
+
+    Root --> A["Custom Backend Integration<br/>(자체 Protocol)"]
+    Root --> B["Managed Server Scaling<br/>(AWS GameLift)"]
+    Root --> C["Platform Backend Integration<br/>(Epic Service 통합)"]
+    Root --> D["Network Transport<br/>(NAT Traversal)"]
+
+    A --> A1["Backend<br/>Go Microservice, RabbitMQ 기반 메시지 버스"]
+    A --> A2["OnlineSubsystemIcarus<br/>WebSocket RPC + STOMP Lobby (UE Plugin)"]
+    B --> B1["Seedworld<br/>Dedicated Server + GameLift Fleet Auto-scaling, gRPC 매치메이킹 연동"]
+    C --> C1["OnlineSubsystemEOS<br/>EOS SDK를 UE OnlineSubsystem으로 wrapping, EOS P2P NAT Traversal 통합"]
+    D --> D1["SimpleUPNP<br/>UPnP IGD로 Router에 Port Mapping을 자동 등록, Relay 서버 없이 P2P 성립"]
+
+    A1 & A2 & B1 & C1 & D1 --> K(["Kiraverse<br/>Session 위의 Gameplay/Combat 로직 (GAS, Server-authoritative)"])
 ```
 
 - **Backend**와 **OnlineSubsystemIcarus**는 한 쌍의 서버/클라이언트 구현입니다. Backend는 여러 독립 Go microservice를 RabbitMQ 메시지 버스로 결합한 서버 측이고, OnlineSubsystemIcarus는 그 Backend와 WebSocket(자체 프레임 Protocol) + STOMP Lobby Messaging으로 통신하는, Unreal Engine Dedicated Server/Client에 탑재되는 Plugin입니다. Wire Protocol을 서버·클라이언트 양쪽에 직접 설계·구현했다는 점에서, 표준 Platform SDK에 의존하지 않는 완전한 Custom Backend 통합 사례이며, Client가 곧 서버 역할을 겸하는 **P2P Hosting** 구조입니다.
 - **Seedworld는 Dedicated Server, Icarus는 P2P 호스팅 모델입니다.** Seedworld는 Unreal Engine Dedicated Server를 AWS GameLift Fleet으로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드(TurboLink)로 서버 등록·플레이어 매칭을 처리합니다. Client가 호스트가 되는 대신, GameLift가 Region별 Fleet 용량을 관리하며 필요에 따라 서버 프로세스를 늘리거나 줄이는 **Managed Dedicated Server** 구조입니다.
 - **OnlineSubsystemEOS**는 Unreal Engine Dedicated Server/Client에 탑재되어, Unreal Engine 생태계 안에서 Epic의 Backend Service(인증, Session, matchmaking, P2P)를 엔진 표준 Interface로 통합하는 Middleware Layer입니다. EOS 자체의 P2P NAT Traversal과 Relay Fallback을 활용합니다.
 - **SimpleUPNP**는 Unreal Engine Client와 Dedicated Server 양쪽에서 모두 사용 가능한 Plugin으로, Backend Service 없이 순수 Protocol(UPnP)만으로 실행 중인 PC의 Router에 직접 Port를 열어, Relay Server 없는 완전한 P2P 경로를 확보하는 더 근본적인(low-level) 해법입니다.
+- **Kiraverse**는 성립된 Session 위에서 실제로 실행되는 Gameplay/Combat 로직(GAS 기반 어빌리티, 무기 교체, 폭탄 설치·해체 라운드 루프, 봇 PvP)을 서버 권위 하에 구조화하고 클라이언트와 동기화하는 계층입니다.
 
 다섯 프로젝트를 통해 P2P/Dedicated Server 양쪽 모델에 대한 이해, 분산 Backend Service 및 그에 대응하는 Client-side Protocol 구현 역량, Game Engine Middleware/Network Protocol Level의 문제 해결 역량을 함께 보이는 것을 목표로 했습니다.
 
