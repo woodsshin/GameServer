@@ -73,6 +73,7 @@ flowchart TD
         GATEWAY <--> RMQ["RabbitMQ Broker"]
     end
 ```
+> 🔗 Ref:  <a href="https://github.com/woodsshin/GameServer/blob/main/Backend/README_EN.md#cross-service-architecture" target="_blank"><b>Icarus Backend — Cross-Service Architecture</b></a>
 
 ### Module / Interface / Data Structures
 

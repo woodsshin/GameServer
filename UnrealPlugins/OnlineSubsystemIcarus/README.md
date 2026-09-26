@@ -42,7 +42,6 @@ FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
 ```
 
 ### 전체 아키텍처 다이어그램
-
 ```mermaid
 flowchart TD
     GC["Game Code / Blueprints"]
@@ -72,6 +71,7 @@ flowchart TD
         GATEWAY <--> RMQ["RabbitMQ Broker"]
     end
 ```
+> 🔗 참고:  <a href="https://github.com/woodsshin/GameServer/tree/main/Backend#cross-service-architecture" target="_blank"><b>Icarus Backend — Cross-Service Architecture</b></a>
 
 ### 모듈 / 인터페이스 / 데이터 구조
 
