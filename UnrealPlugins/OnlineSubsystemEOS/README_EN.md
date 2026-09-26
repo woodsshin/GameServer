@@ -5,7 +5,7 @@ It wraps Epic Online Services (EOS) behind Unreal Engine's standard `OnlineSubsy
 
 ---
 
-## 1. Why This Is Needed — OnlineSubsystem Abstraction and EOS
+## 1. OnlineSubsystem Abstraction and EOS
 
 Unreal Engine abstracts online functionality — login, sessions, friends, achievements, P2P networking — behind a common interface called `IOnlineSubsystem`. Game logic only needs to call the interface obtained via `Online::GetSubsystem()`, without needing to know whether the actual implementation underneath is Steam or PSN.
 

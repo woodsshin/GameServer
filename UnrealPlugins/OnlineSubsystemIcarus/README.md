@@ -17,6 +17,8 @@
 
 ## Architecture
 
+### 폴더 구조
+
 ```
 FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
 │
@@ -39,6 +41,92 @@ FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
     └── 대기열 위치 ETA 추정 (CalculateTimeLeft)
 ```
 
+### 전체 아키텍처 다이어그램
+
+```mermaid
+flowchart TD
+    GC["Game Code / Blueprints"]
+    GC -->|"IOnlineSubsystem::Get(ICARUS_SUBSYSTEM)"| CORE
+
+    subgraph SUBSYS["FOnlineSubsystemIcarus : FOnlineSubsystemIcarusGen"]
+        CORE["CORE 서브시스템"]
+        ID["FOnlineIdentityInterfaceIcarus<br/>(IOnlineIdentity 구현)"]
+        SESS["FOnlineSessionIcarus<br/>(IOnlineSession 구현)"]
+        CLOUD["FOnlineUserCloudIcarus<br/>(IOnlineUserCloud 구현)"]
+        USERI["FOnlineUserInterfaceIcarus<br/>(IOnlineUser 구현)"]
+        PROF["FOnlineProfileIcarus<br/>(Icarus 전용, FOnlineProfileIcarusGen 상속)"]
+        LOBBY["FOnlineLobbyIcarus<br/>(Icarus 전용)"]
+        CORE --> ID & SESS & CLOUD & USERI & PROF & LOBBY
+    end
+
+    subgraph CONN["Connection Layer — 모든 백엔드 통신이 routing되는 지점"]
+        CC["UIcarusConnectionComponent<br/>: UIcarusConnectionComponentBase<br/>(Gateway, WebSocket)"]
+        ID & SESS & CLOUD & USERI & PROF & LOBBY --> CC
+        CC -.->|"JWT 토큰 재사용"| WSPROTO
+
+        WSPROTO["FIcarusWSFrame<br/>(WebSocketsModule, ws/wss)"]
+    end
+
+    subgraph BACK["Game Backend (Kubernetes)"]
+        WSPROTO <--> GATEWAY["Gateway(Game Backend)"]
+        GATEWAY <--> RMQ["RabbitMQ Broker"]
+    end
+```
+
+### 모듈 / 인터페이스 / 데이터 구조
+
+```mermaid
+flowchart TD
+    MODULE["FOnlineSubsystemIcarusModule<br/>(모듈 정의 및 등록 제어)"]
+    MODULE -->|"ICARUS_SUBSYSTEM 이름으로 등록<br/>(DefaultEngine.ini 설정 기반)"| CORE["FOnlineSubsystemIcarus<br/>: FOnlineSubsystemIcarusGen"]
+
+    CORE -->|"GetIdentityInterface()"| IDENTITY["FOnlineIdentityInterfaceIcarus<br/>: IOnlineIdentity"]
+    IDENTITY --> IDDATA["사용 데이터 구조<br/>FUserOnlineAccountIcarus<br/>FOnlineAccountCredentials<br/>FUniqueNetIdString"]
+
+    CORE -->|"GetSessionInterface()"| SESSION["FOnlineSessionIcarus<br/>: IOnlineSession"]
+    SESSION --> SESSDATA["담당 기능<br/>matchmaking / 호스트 migration<br/>connection string relay"]
+
+    CORE -->|"GetUserCloudInterface()"| CLOUD["FOnlineUserCloudIcarus<br/>: IOnlineUserCloud"]
+    CLOUD --> CLOUDDATA["WriteUserFile() 요청 헤더<br/>WS_HEADER_HASH (SHA1)<br/>WS_HEADER_UNCOMPRESSED_LENGTH<br/>WS_HEADER_PROGRESS_KEY"]
+
+    CORE -->|"(Icarus 전용 서비스)"| PROFILE["FOnlineProfileIcarus<br/>: FOnlineProfileIcarusGen"]
+    PROFILE --> PROFDATA["사용 데이터 구조<br/>FReqUnlockCharacterFlags<br/>(ChrSlot 유효성 검증)"]
+```
+
+### 로그인 시퀀스 예시
+
+```mermaid
+sequenceDiagram
+    participant GC as Game Code / Blueprint
+    participant ID as FOnlineIdentityInterfaceIcarus
+    participant CC as UIcarusConnectionComponent
+    participant BE as Gateway (Backend)
+
+    GC->>ID: Login(LocalUserNum, AccountCredentials)
+    opt 이미 로그인 진행 중(bHasLoginOutstanding)이거나 기존 세션 존재
+        ID->>ID: Logout(LocalUserNum) 선행 처리
+    end
+    ID->>CC: GetIcarusConnectionComponent()->Connect(AccountCredentials)
+    CC->>BE: WebSocket handshake<br/>(Type / UserId / AppId / AuthToken 등 upgrade header)
+
+    alt handshake 개시 실패
+        CC-->>ID: Connect() == false
+        ID->>ID: Logout(LocalUserNum)
+        ID-->>GC: TriggerOnLoginCompleteDelegates(false, ..., "Failed to connect to Icarus backend")
+    else handshake 개시 성공
+        CC-->>ID: Connect() == true
+        ID-->>GC: Login() return true (최종 로그인 결과 아님)
+        BE-->>CC: ResUserTicket 응답
+        CC-->>ID: OnResUserTicket 콜백
+        alt 매칭되는 로컬 유저 있음
+            ID-->>GC: TriggerOnLoginCompleteDelegates(true, UserId, "")
+        else 매칭 유저 없음 + 오프라인 모드
+            ID->>ID: dummy FUserOnlineAccountIcarus 생성<br/>UserAccounts / UserIds 등록
+            ID-->>GC: TriggerOnLoginCompleteDelegates(...)
+        end
+    end
+```
+
 ---
 
 ## Core Components
@@ -49,7 +137,7 @@ STOMP에서 착안한 자체 프레임 format(`COMMAND\nheader:value\n\nBODY`)�
 - STOMP spec에 준하는 헤더 escape encoding(`\`, `:`, `\n`, `\r`)을 지원하며, 레거시 호환을 위해 `CONNECT` command는 예외 처리.
 - Thread-safe(`FCriticalSection`으로 보호)하게 순차적으로 증가하는 `FrameIndex`를 사용해 비동기 요청과 응답을 correlate시킴.
 - Heartbeat 프레임(`IcarusHeartbeatCommand`)은 단일 `\n`으로 encoding.
-- 모든 요청 프레임에 JWT Bearer 토큰(`WS_HEADER_JWT_TOKEN`)을 자동 주입.
+- 모든 요청 프레임에 JWT Bearer 토큰(`WS_HEADER_JWT_TOKEN`)을 설정.
 - 로컬/싱글플레이어 fallback 경로를 위한 오프라인 모드 프레임 생성 지원.
 
 ```cpp
@@ -92,7 +180,7 @@ static uint8 ReadValue(const uint8* In, SIZE_T Length, SIZE_T& Index, FIcarusWSB
 ```
 
 ```cpp
-// IcarusWSFrame.cpp — 생성자에서 모든 온라인 프레임에 JWT를 자동 주입
+// IcarusWSFrame.cpp — 생성자에서 모든 온라인 프레임에 JWT를 설정
 FIcarusWSFrame::FIcarusWSFrame(const FIcarusWSCommand& InCommand, const FIcarusWSHeader& InHeader,
                                 const FIcarusWSBuffer& InBody, bool bInOfflineFrame)
     : FrameIdx(INDEX_NONE)
@@ -637,7 +725,7 @@ bool FOnlineProfileIcarus::ValidateUnlockCharacterFlags(const FReqUnlockCharacte
 - **WebSocket 업그레이드 헤더 기반 인증**: `Connect()`는 표준 WebSocket handshake의 upgrade header에 플랫폼 타입, 유저 ID, AppId, 플랫폼 native auth token, 그리고 클라이언트/데이터 버전을 실어 보내 별도의 로그인 RPC 없이 handshake 단계에서 인증을 수행.
 
   ```cpp
-  // IcarusConnectionComponentBase.cpp — WebSocket handshake header에 인증/버전 정보 주입
+  // IcarusConnectionComponentBase.cpp — WebSocket handshake header에 인증/버전 정보 설정
   TMap<FString, FString> UpgradeHeaders;
   UpgradeHeaders.Add(TEXT("Type"), DefaultPlatformService);
   UpgradeHeaders.Add(TEXT("UserId"), AccountCredentials.Id);

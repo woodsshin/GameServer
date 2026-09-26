@@ -5,7 +5,7 @@ Unreal Engine Marketplace에 등록된 **Native Code Plugin**입니다.
 
 ---
 
-## 1. 왜 필요한가 — UPnP와 NAT Traversal
+## 1. UPnP와 NAT Traversal
 
 가정용 인터넷 환경은 대부분 공유기 뒤에 Private IP(NAT)로 묶여 있습니다. 그래서 내가 Host가 되어 게임 Session을 열어도, 외부에 있는 친구는 내 PC의 Private IP로 직접 접속할 수 없습니다. 이를 해결하는 전통적인 방법은 세 가지입니다.
 

@@ -17,6 +17,8 @@ The subsystem exposes the standard UE interfaces (`IOnlineIdentity`, `IOnlineSes
 
 ## Architecture
 
+### Folder Structure
+
 ```
 FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
 │
@@ -37,6 +39,93 @@ FOnlineSubsystemIcarus (FOnlineSubsystemIcarusGen)
     ├── STOMP client (RabbitMQ) — built on StompModule
     ├── FLobbyWSFrame — adapter that wraps IStompMessage into the common FIcarusWSFrame body format
     └── Queue position ETA estimation (CalculateTimeLeft)
+```
+
+### Overall Architecture Diagram
+
+```mermaid
+flowchart TD
+    GC["Game Code / Blueprints"]
+    GC -->|"IOnlineSubsystem::Get(ICARUS_SUBSYSTEM)"| CORE
+
+    subgraph SUBSYS["FOnlineSubsystemIcarus : FOnlineSubsystemIcarusGen"]
+        CORE["Core subsystem"]
+        ID["FOnlineIdentityInterfaceIcarus<br/>(implements IOnlineIdentity)"]
+        SESS["FOnlineSessionIcarus<br/>(implements IOnlineSession)"]
+        CLOUD["FOnlineUserCloudIcarus<br/>(implements IOnlineUserCloud)"]
+        USERI["FOnlineUserInterfaceIcarus<br/>(implements IOnlineUser)"]
+        PROF["FOnlineProfileIcarus<br/>(Icarus-specific, extends FOnlineProfileIcarusGen)"]
+        LOBBY["FOnlineLobbyIcarus<br/>(Icarus-specific)"]
+        CORE --> ID & SESS & CLOUD & USERI & PROF & LOBBY
+    end
+
+    subgraph CONN["Connection Layer — all backend traffic is routed through here"]
+        CC["UIcarusConnectionComponent<br/>: UIcarusConnectionComponentBase<br/>(Gateway, WebSocket)"]
+
+        ID & SESS & CLOUD & USERI & PROF & LOBBY --> CC
+        CC -.->|"reuses JWT token"| WSPROTO
+
+        WSPROTO["FIcarusWSFrame<br/>(WebSocketsModule, ws/wss)"]
+    end
+
+    subgraph BACK["Game Backend (Kubernetes)"]
+        WSPROTO <--> GATEWAY["Gateway(Game Backend)"]
+        GATEWAY <--> RMQ["RabbitMQ Broker"]
+    end
+```
+
+### Module / Interface / Data Structures
+
+```mermaid
+flowchart TD
+    MODULE["FOnlineSubsystemIcarusModule<br/>(module definition & registration)"]
+    MODULE -->|"registered under ICARUS_SUBSYSTEM<br/>(via DefaultEngine.ini)"| CORE["FOnlineSubsystemIcarus<br/>: FOnlineSubsystemIcarusGen"]
+
+    CORE -->|"GetIdentityInterface()"| IDENTITY["FOnlineIdentityInterfaceIcarus<br/>: IOnlineIdentity"]
+    IDENTITY --> IDDATA["Data structures used<br/>FUserOnlineAccountIcarus<br/>FOnlineAccountCredentials<br/>FUniqueNetIdString"]
+
+    CORE -->|"GetSessionInterface()"| SESSION["FOnlineSessionIcarus<br/>: IOnlineSession"]
+    SESSION --> SESSDATA["Responsibilities<br/>matchmaking / host migration<br/>connection string relay"]
+
+    CORE -->|"GetUserCloudInterface()"| CLOUD["FOnlineUserCloudIcarus<br/>: IOnlineUserCloud"]
+    CLOUD --> CLOUDDATA["WriteUserFile() request headers<br/>WS_HEADER_HASH (SHA1)<br/>WS_HEADER_UNCOMPRESSED_LENGTH<br/>WS_HEADER_PROGRESS_KEY"]
+
+    CORE -->|"(Icarus-specific service)"| PROFILE["FOnlineProfileIcarus<br/>: FOnlineProfileIcarusGen"]
+    PROFILE --> PROFDATA["Data structures used<br/>FReqUnlockCharacterFlags<br/>(ChrSlot validation)"]
+```
+
+### Example Login Sequence
+
+```mermaid
+sequenceDiagram
+    participant GC as Game Code / Blueprint
+    participant ID as FOnlineIdentityInterfaceIcarus
+    participant CC as UIcarusConnectionComponent
+    participant BE as Gateway (Backend)
+
+    GC->>ID: Login(LocalUserNum, AccountCredentials)
+    opt A login is already in progress (bHasLoginOutstanding) or a session already exists
+        ID->>ID: Logout(LocalUserNum) runs first
+    end
+    ID->>CC: GetIcarusConnectionComponent()->Connect(AccountCredentials)
+    CC->>BE: WebSocket handshake<br/>(Type / UserId / AppId / AuthToken, etc. as upgrade headers)
+
+    alt Handshake failed to start
+        CC-->>ID: Connect() == false
+        ID->>ID: Logout(LocalUserNum)
+        ID-->>GC: TriggerOnLoginCompleteDelegates(false, ..., "Failed to connect to Icarus backend")
+    else Handshake started successfully
+        CC-->>ID: Connect() == true
+        ID-->>GC: Login() returns true (not the final result yet)
+        BE-->>CC: ResUserTicket response
+        CC-->>ID: OnResUserTicket callback
+        alt Matching local user found
+            ID-->>GC: TriggerOnLoginCompleteDelegates(true, UserId, "")
+        else No matching user + offline mode
+            ID->>ID: Create dummy FUserOnlineAccountIcarus<br/>register into UserAccounts / UserIds
+            ID-->>GC: TriggerOnLoginCompleteDelegates(...)
+        end
+    end
 ```
 
 ---

@@ -5,7 +5,7 @@ Its purpose is to let the PC running the game Client **automatically register po
 
 ---
 
-## 1. Why It's Needed — UPnP and NAT Traversal
+## 1. UPnP and NAT Traversal
 
 Most home internet setups sit behind a router with a private IP (NAT). So even if you host a game session, a friend outside your network can't connect directly to your PC's private IP. There are three traditional ways to solve this.
 

@@ -5,7 +5,7 @@ Epic Online Services(EOS)를 언리얼 엔진의 표준 `OnlineSubsystem` 인터
 
 ---
 
-## 1. 왜 필요한가 — OnlineSubsystem 추상화와 EOS
+## 1. OnlineSubsystem 추상화와 EOS
 
 Unreal Engine은 `IOnlineSubsystem`이라는 공통 인터페이스로 로그인, 세션, 친구, 업적, P2P 네트워킹 같은 온라인 기능을 추상화합니다. 게임 로직은 `Online::GetSubsystem()`으로 받아온 인터페이스만 호출하면 되고, 실제 구현체가 Steam인지 PSN인지는 몰라도 됩니다.
 
