@@ -26,7 +26,7 @@ This plugin implements exactly that IGD profile: the moment the game runs, it au
 UPnP IGD operates in the four stages below, and this plugin's state machine (`UPNPState`) follows the same flow.
 
 ```
-1) Discovery (SSDP)        : Broadcast "is there a gateway?" via multicast
+1) Discovery (SSDP)        : Broadcast gateway search request via multicast
         ↓
 2) Description (HTTP GET)  : Fetch the device's XML description from the returned Location URL
         ↓                    (parse the list of controllable service URLs here)

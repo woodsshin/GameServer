@@ -17,7 +17,7 @@ Unreal Engine Marketplace에 등록된 **Native Code Plugin**입니다.
 
 **UPnP(Universal Plug and Play)**는 이 세 번째 방법을 표준화한 Protocol입니다. Home Network 안의 기기들이 서로를 자동으로 찾고(Discovery), 서비스를 제어(Control)할 수 있게 해주는데, 그중 인터넷 공유기가 구현하는 **IGD(Internet Gateway Device)** Profile을 이용하면 Application이 직접 Port Mapping을 추가/삭제할 수 있습니다.
 
-이 Plugin은 정확히 이 IGD Profile을 구현해서, 게임이 실행되는 순간 자동으로 "내 게임 Port를 외부로 열어달라"고 공유기에 Request하고, 성공하면 Relay 서버 없이 진짜 P2P로 다른 Player가 접속할 수 있게 됩니다.
+이 Plugin은 정확히 이 IGD Profile을 구현해서, 게임이 실행되는 순간 자동으로 "내 게임 Port를 외부로 열어달라"고 공유기에 Request하고, 성공하면 Relay 서버 없이 P2P로 다른 Player가 접속할 수 있게 됩니다.
 
 ---
 
@@ -26,7 +26,7 @@ Unreal Engine Marketplace에 등록된 **Native Code Plugin**입니다.
 UPnP IGD는 아래 4단계로 동작하며, 이 Plugin의 State Machine(`UPNPState`)도 동일한 흐름을 따릅니다.
 
 ```
-1) Discovery (SSDP)        : Multicast로 "Gateway 있니?" Broadcast
+1) Discovery (SSDP)        : Multicast로 Gateway 검색 요청 Broadcast
         ↓
 2) Description (HTTP GET)  : 응답받은 Location URL에서 기기의 XML Description을 받아옴
         ↓                    (여기서 제어 가능한 Service URL 목록을 Parsing)
