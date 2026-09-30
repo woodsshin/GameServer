@@ -37,7 +37,7 @@ flowchart LR
 sequenceDiagram
     autonumber
     participant C as Admin Client
-    box rgba(100, 149, 237, 0.15) admin-proxy (internal modules)
+    box rgba(100,149,237,0.35) admin-proxy internal modules
         participant A as adminHandler
         participant H as handler
     end
