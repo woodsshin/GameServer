@@ -11,17 +11,68 @@
 1. **Fire-and-forget 방식 관리 endpoint** (`/update`, `/reset`, `/version`) — 응답을 기다리지 않고 RabbitMQ로 broadcast/round-robin message를 발행한 뒤 즉시 `200 OK`를 반환.
 2. **동기 RPC endpoint** (`/admin`) — 임의의 admin RPC를 RabbitMQ 너머의 서비스로 전달하고, 해당 서비스의 응답이 돌아올 때까지 HTTP connection을 유지한 뒤 응답 body를 그대로 client에 전달.
 
-```
-Admin Client (internal network)
-        │  HTTP
-        ▼
-   admin-proxy  ──── RabbitMQ Exchange (PL / SM / GW / AP) ────▶  Player Service / Session Manager / Gateway
-        ▲                                                                    │
-        │  frameIdx로 매칭된 context.Value 응답                                │
-        └────────────── RabbitMQ return queue (exclusive) ◀───────────────────┘
+```mermaid
+flowchart LR
+    Client["Admin Client<br/>(internal network)"]
+    Proxy["admin-proxy"]
+    Exchange{{"RabbitMQ Exchange<br/>PL / SM / GW / AP"}}
+    Services["Player Service<br/>Session Manager<br/>Gateway"]
+    ReturnQ[["RabbitMQ return queue<br/>(exclusive)"]]
+
+    Client -- "HTTP request" --> Proxy
+    Proxy -- "publish" --> Exchange
+    Exchange --> Services
+    Services -- "response" --> ReturnQ
+    ReturnQ -- "consume<br/>frameIdx로 매칭된 context.Value 응답" --> Proxy
+    Proxy -- "HTTP response" --> Client
 ```
 
 핵심 설계 과제는 **RabbitMQ의 비동기 pub/sub 모델 위에 HTTP의 동기 request/response 모델을 자연스럽게 연동하는 것**이며, 이는 `frameIdx` 기반 `context.Context` correlation 메커니즘으로 해결됩니다.
+
+### `/admin` 동기 RPC 시퀀스
+
+`/admin` 요청 하나가 처리되는 동안 `frameIdx`로 `context`가 등록되고, 응답이 도착하면 `CancelFunc`로 대기 중인 HTTP handler가 트리거되는 과정입니다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Admin Client
+    participant A as adminHandler
+    participant H as handler
+    participant MQ as RabbitMQ
+    participant S as Player Service / Session Manager
+    participant L as Return Queue Consumer
+
+    C->>A: HTTP request (EventName, UserID header, body)
+    A->>A: getFrameIdx() 로 고유 frameIdx 발급
+    A->>A: context.WithTimeout 10초 생성
+    A->>H: HandleAdminRequest(frameIdx, ctx)
+    H->>H: adminPLRPCs / adminSMRPCs 화이트리스트 확인
+
+    alt 미등록 RPC
+        H-->>A: 요청 거부
+        A-->>C: 에러 응답
+    else 등록된 RPC
+        H->>H: frameIdx 기준으로 Context / CancelFunc 저장
+        H->>MQ: publish (Persistent, 목적지 exchange)
+        MQ->>S: ReqXxx 전달
+        A->>A: 10ms 간격 polling 시작
+
+        S->>MQ: ResXxx 발행 (return queue)
+        MQ->>L: delivery
+        L->>H: HandleResponse
+        H->>H: onResAdminRequest: frameIdx header로 context 탐색
+        H->>H: 에러 header 여부에 따라 context value 주입
+        H->>A: CancelFunc() 호출
+
+        alt 10초 이내 응답 도착 (context.Canceled)
+            A-->>C: 응답 body 그대로 전달
+        else timeout (DeadlineExceeded)
+            A-->>C: timeout 응답
+        end
+    end
+    L->>MQ: Ack
+```
 
 ---
 

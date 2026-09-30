@@ -11,12 +11,23 @@ Icarus 백엔드의 세션/진행도 저장소 역할을 하는 Go microservice�
 
 ## 아키텍처
 
-```
-┌────────────┐   MM Exchange     ┌──────────────────┐    HGet/HSet/Pipeline    ┌───────────────┐
-│  Gateway /  │ ────────────────▶ │                   │ ───────────────────────▶│               │
-│  다른 서비스 │   (RabbitMQ)      │  sessionmanager    │                          │ Redis Cluster │
-└────────────┘ ◀──────────────── │  (SM Exchange)     │                          │               │
-                응답(QueueMessage) └──────────────────┘                          └───────────────┘
+```mermaid
+flowchart LR
+    C["Gateway / 다른 서비스"]
+
+    subgraph MQ["RabbitMQ"]
+        MM[["MM Exchange"]]
+        SM[["SM Exchange / Queue"]]
+    end
+
+    S["sessionmanager"]
+    R[("Redis Cluster")]
+
+    C -->|"요청"| MM
+    MM --> SM
+    SM -->|"consume"| S
+    S -->|"HGet / HSet / TxPipeline"| R
+    S -->|"응답 (QueueMessage, frameidx 복사)"| C
 ```
 
 - `SM` exchange/queue를 선언·바인딩하고 메시지를 consume, 처리 후 요청에 담긴 `queueName`으로 응답을 되돌려 보냅니다.

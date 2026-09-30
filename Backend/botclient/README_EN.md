@@ -8,31 +8,22 @@ A Go-based simulation client for game backend **load testing**. It reproduces th
 
 `botclient` reads a scenario defined in JSON, spawns as many independent virtual users as configured, and drives each one through its own request sequence via its own state machine. Each bot follows exactly the same overall flow as a real game client: lobby queue → JWT authentication → WebSocket gateway connection → RPC request/response cycle.
 
-```
-botrequest.json (scenario definition)
-        │
-        ▼
-   Run() ── spawns botcount goroutines
-        │
-        ▼
-┌───────────────────────────────────────────────────┐
-│  Per-bot lifecycle                                 │
-│                                                     │
-│  Connect Lobby(STOMP) ──▶ ReqLobbyMessage ──▶ Receive JWT│
-│         │                                          │
-│         ▼                                          │
-│  Connect Gateway(WebSocket) (jwttoken header)       │
-│         │                                          │
-│         ▼                                          │
-│  Execute Scenario Requests sequentially            │
-│  (ReqIdx increments, RecvAck gates the next request)│
-│         │                                          │
-│         ▼                                          │
-│  Repeat ends → NeedReset → restart from Lobby      │
-└───────────────────────────────────────────────────┘
-        │
-        ▼
-   Central tick loop (TickInSec interval) — triggers the next request send for all bots
+```mermaid
+flowchart TD
+    A["botrequest.json<br/>(scenario definition)"] --> B["Run()<br/>spawns botcount goroutines"]
+
+    subgraph BOT["Lifecycle per bot"]
+        direction TB
+        L["Lobby (STOMP) connection"] --> M["ReqLobbyMessage"]
+        M --> J["Receive JWT"]
+        J --> G["Gateway (WebSocket) connection<br/>(jwttoken header)"]
+        G --> S["Run Scenario Requests sequentially<br/>(ReqIdx increments, RecvAck gates the next request)"]
+        S --> R["Repeat ends<br/>→ NeedReset"]
+        R -->|"Restart from Lobby"| L
+    end
+
+    B --> L
+    BOT --> T["Central tick loop (TickInSec interval)<br/>triggers the next request send for all bots"]
 ```
 
 ---

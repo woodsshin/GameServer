@@ -8,31 +8,22 @@
 
 `botclient`는 JSON으로 정의된 시나리오(scenario)를 읽어, 설정된 수만큼의 독립적인 가상 유저를 생성하고 각자 자체적인 상태 머신(state machine)으로 요청 시퀀스를 진행시킵니다. 각 봇은 실제 게임 클라이언트와 동일하게 로비 대기열 → JWT 인증 → WebSocket gateway 연결 → RPC 요청/응답 사이클이라는 전체 흐름을 그대로 밟습니다.
 
-```
-botrequest.json (시나리오 정의)
-        │
-        ▼
-   Run() ── botcount개의 goroutine 생성
-        │
-        ▼
-┌───────────────────────────────────────────────────┐
-│  봇 1개당 lifecycle                                  │
-│                                                     │
-│  Lobby(STOMP) 연결 ──▶ ReqLobbyMessage ──▶ JWT 수신   │
-│         │                                          │
-│         ▼                                          │
-│  Gateway(WebSocket) 연결 (jwttoken 헤더)              │
-│         │                                          │
-│         ▼                                          │
-│  Scenario Requests 순차 실행                         │
-│  (ReqIdx 증가, RecvAck로 다음 요청 gate)               │
-│         │                                          │
-│         ▼                                          │
-│  반복(Repeat) 종료 → NeedReset → Lobby부터 재시작        │
-└───────────────────────────────────────────────────┘
-        │
-        ▼
-   중앙 tick loop (TickInSec 주기) — 모든 봇의 다음 요청 전송 트리거
+```mermaid
+flowchart TD
+    A["botrequest.json<br/>(시나리오 정의)"] --> B["Run()<br/>botcount개의 goroutine 생성"]
+
+    subgraph BOT["봇 1개당 lifecycle"]
+        direction TB
+        L["Lobby(STOMP) 연결"] --> M["ReqLobbyMessage"]
+        M --> J["JWT 수신"]
+        J --> G["Gateway(WebSocket) 연결<br/>(jwttoken 헤더)"]
+        G --> S["Scenario Requests 순차 실행<br/>(ReqIdx 증가, RecvAck로 다음 요청 gate)"]
+        S --> R["반복(Repeat) 종료<br/>→ NeedReset"]
+        R -->|"Lobby부터 재시작"| L
+    end
+
+    B --> L
+    BOT --> T["중앙 tick loop (TickInSec 주기)<br/>모든 봇의 다음 요청 전송 트리거"]
 ```
 
 ---

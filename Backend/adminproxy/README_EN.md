@@ -11,17 +11,68 @@ This service exposes two broad kinds of endpoints.
 1. **Fire-and-forget admin endpoints** (`/update`, `/reset`, `/version`) — publish a broadcast/round-robin message to RabbitMQ without waiting for a response, then immediately return `200 OK`.
 2. **Synchronous RPC endpoint** (`/admin`) — forwards an arbitrary admin RPC to a service across RabbitMQ, keeps the HTTP connection open until that service's response comes back, and passes the response body straight through to the client.
 
-```
-Admin Client (internal network)
-        │  HTTP
-        ▼
-   admin-proxy  ──── RabbitMQ Exchange (PL / SM / GW / AP) ────▶  Player Service / Session Manager / Gateway
-        ▲                                                                    │
-        │  context.Value response matched by frameIdx                       │
-        └────────────── RabbitMQ return queue (exclusive) ◀───────────────────┘
+```mermaid
+flowchart LR
+    Client["Admin Client<br/>(internal network)"]
+    Proxy["admin-proxy"]
+    Exchange{{"RabbitMQ Exchange<br/>PL / SM / GW / AP"}}
+    Services["Player Service<br/>Session Manager<br/>Gateway"]
+    ReturnQ[["RabbitMQ return queue<br/>(exclusive)"]]
+
+    Client -- "HTTP request" --> Proxy
+    Proxy -- "publish" --> Exchange
+    Exchange --> Services
+    Services -- "response" --> ReturnQ
+    ReturnQ -- "consume<br/>context.Value response matched by frameIdx" --> Proxy
+    Proxy -- "HTTP response" --> Client
 ```
 
 The core design challenge is **bridging HTTP's synchronous request/response model naturally onto RabbitMQ's asynchronous pub/sub model**, which is solved via a `frameIdx`-based `context.Context` correlation mechanism.
+
+### `/admin` Synchronous RPC Sequence
+
+This shows how, for a single `/admin` request, a `context` is registered by `frameIdx`, and how `CancelFunc` is triggered the waiting HTTP handler once the response arrives.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Admin Client
+    participant A as adminHandler
+    participant H as handler
+    participant MQ as RabbitMQ
+    participant S as Player Service / Session Manager
+    participant L as Return Queue Consumer
+
+    C->>A: HTTP request (EventName, UserID header, body)
+    A->>A: Issue unique frameIdx via getFrameIdx()
+    A->>A: Create context.WithTimeout (10s)
+    A->>H: HandleAdminRequest(frameIdx, ctx)
+    H->>H: Check adminPLRPCs / adminSMRPCs whitelist
+
+    alt Unregistered RPC
+        H-->>A: Reject request
+        A-->>C: Error response
+    else Registered RPC
+        H->>H: Store Context / CancelFunc keyed by frameIdx
+        H->>MQ: publish (Persistent, destination exchange)
+        MQ->>S: Deliver ReqXxx
+        A->>A: Start polling every 10ms
+
+        S->>MQ: Publish ResXxx (return queue)
+        MQ->>L: delivery
+        L->>H: HandleResponse
+        H->>H: onResAdminRequest: look up context by frameIdx header
+        H->>H: Inject context value depending on error headers
+        H->>A: Call CancelFunc()
+
+        alt Response within 10s (context.Canceled)
+            A-->>C: Pass response body through
+        else Timeout (DeadlineExceeded)
+            A-->>C: Timeout response
+        end
+    end
+    L->>MQ: Ack
+```
 
 ---
 

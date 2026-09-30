@@ -8,17 +8,12 @@ A Go-based backend microservice that polls the **RabbitMQ Management API** to co
 
 `lobbystats` is a small service with a single responsibility: it periodically queries the number of waiting entries and the processing rate accumulated in a specific RabbitMQ queue (`lobby`), reshapes that data into a form game clients can consume, and republishes it back to the same RabbitMQ instance via STOMP.
 
-```
-RabbitMQ Management HTTP API  ──(polling)──▶  lobbystats
-                                                   │
-                                                   ▼
-                                        Build model.ResLobbyStats
-                                                   │
-                                                   ▼
-RabbitMQ (STOMP) ◀──(WsMessage encoding)── lobbystats
-       │
-       ▼
-Game client (Unreal OSS Lobby Connection Component)
+```mermaid
+flowchart TD
+    API["RabbitMQ Management HTTP API"] -->|polling| LS["lobbystats"]
+    LS --> BUILD["Build model.ResLobbyStats"]
+    BUILD -->|"WsMessage encoding"| MQ["RabbitMQ (STOMP)"]
+    MQ -->|"STOMP subscription"| CLIENT["Game client<br/>(Unreal OSS Lobby Connection Component)"]
 ```
 
 The key design point is that client and server share the **same frame format** (`EventName\nheader:value\n\nBody`); `parser.WsMessage` handles this encoding and is a wire-compatible counterpart to the client-side `FIcarusWSFrame`.

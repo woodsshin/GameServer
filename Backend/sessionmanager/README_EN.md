@@ -11,13 +11,23 @@ A Go microservice that acts as the session/progress store for the Icarus backend
 
 ## Architecture
 
-```
-┌────────────┐   MM Exchange     ┌──────────────────┐    HGet/HSet/Pipeline    ┌───────────────┐
-│  Gateway /  │ ────────────────▶ │                   │ ───────────────────────▶│               │
-│  Other      │   (RabbitMQ)      │  sessionmanager    │                          │ Redis Cluster │
-│  services   │ ◀──────────────── │  (SM Exchange)     │                          │               │
-└────────────┘   Response         └──────────────────┘                          └───────────────┘
-                (QueueMessage)
+```mermaid
+flowchart LR
+    C["Gateway / Other services"]
+
+    subgraph MQ["RabbitMQ"]
+        MM[["MM Exchange"]]
+        SM[["SM Exchange / Queue"]]
+    end
+
+    S["sessionmanager"]
+    R[("Redis Cluster")]
+
+    C -->|"Request"| MM
+    MM --> SM
+    SM -->|"consume"| S
+    S -->|"HGet / HSet / TxPipeline"| R
+    S -->|"Response (QueueMessage, frameidx copied)"| C
 ```
 
 - Declares and binds the `SM` exchange/queue, consumes messages, processes them, and sends the response back to the `queueName` included in the request.

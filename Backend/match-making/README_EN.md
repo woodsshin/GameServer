@@ -11,15 +11,25 @@ A C#/.NET gRPC-based matchmaking backend. It receives requests from the game cli
 
 ## Architecture
 
-```
-┌──────────────┐        EOS JWT         ┌────────────────────────┐        AWS SDK        ┌─────────────┐
-│ Game Client  │ ─────────────────────▶ │                        │ ─────────────────────▶│             │
-└──────────────┘   MatchMakingSvc       │   MatchMaking Service   │   StartMatchmaking     │ AWS GameLift │
-                    (gRPC)              │   (ASP.NET Core /       │   SearchGameSessions    │  (FlexMatch, │
-┌──────────────┐        S2S JWT         │    Kestrel + gRPC)      │   CreatePlayerSession   │   Fleets)    │
-│ Dedicated    │ ─────────────────────▶ │                        │                        │             │
-│ Server       │   MatchMakingSvcDS     └────────────────────────┘                        └─────────────┘
-└──────────────┘
+```mermaid
+flowchart LR
+    GC["Game Client"]
+    DS["Dedicated Server"]
+
+    subgraph SVC["MatchMaking Service (ASP.NET Core / Kestrel + gRPC)"]
+        A["MatchMakingSvc<br/>Policy: EpicUser"]
+        B["MatchMakingSvcDS<br/>Policy: DedicatedServer"]
+    end
+
+    subgraph GL["AWS GameLift"]
+        FM["FlexMatch"]
+        FL["Fleets"]
+    end
+
+    GC -->|"gRPC + EOS JWT"| A
+    DS -->|"gRPC + S2S JWT"| B
+    A -->|"AWS SDK<br/>StartMatchmaking<br/>SearchGameSessions<br/>CreatePlayerSession"| GL
+    B -->|"AWS SDK"| GL
 ```
 
 - `MatchMakingSvc`: Called by the game client, using the `EpicUser` policy (EOS authentication).

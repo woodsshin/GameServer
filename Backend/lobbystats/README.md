@@ -8,17 +8,12 @@
 
 `lobbystats`는 단일 책임을 갖는 작은 서비스입니다: RabbitMQ의 특정 큐(`lobby`)에 쌓인 대기 인원과 처리 속도를 주기적으로 조회하고, 이를 게임 클라이언트가 소비할 수 있는 형태로 재가공하여 같은 RabbitMQ에 STOMP로 다시 publish합니다.
 
-```
-RabbitMQ Management HTTP API  ──(polling)──▶  lobbystats
-                                                   │
-                                                   ▼
-                                        model.ResLobbyStats 생성
-                                                   │
-                                                   ▼
-RabbitMQ (STOMP) ◀──(WsMessage encoding)── lobbystats
-       │
-       ▼
-게임 클라이언트 (Unreal OSS Lobby Connection Component)
+```mermaid
+flowchart TD
+    API["RabbitMQ Management HTTP API"] -->|polling| LS["lobbystats"]
+    LS --> BUILD["model.ResLobbyStats 생성"]
+    BUILD -->|"WsMessage encoding"| MQ["RabbitMQ (STOMP)"]
+    MQ -->|"STOMP subscription"| CLIENT["게임 클라이언트<br/>(Unreal OSS Lobby Connection Component)"]
 ```
 
 클라이언트와 서버가 **동일한 프레임 format**(`EventName\nheader:value\n\nBody`)을 공유하는 것이 핵심 설계 포인트로, `parser.WsMessage`가 이 encoding을 담당하며 이는 클라이언트 측 `FIcarusWSFrame`과 wire-compatible한 대응 구현체입니다.
