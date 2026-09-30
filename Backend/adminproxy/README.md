@@ -37,8 +37,10 @@ flowchart LR
 sequenceDiagram
     autonumber
     participant C as Admin Client
-    participant A as adminHandler
-    participant H as handler
+    box rgba(100, 149, 237, 0.15) admin-proxy (internal modules)
+        participant A as adminHandler
+        participant H as handler
+    end
     participant MQ as RabbitMQ
     participant S as Player Service / Session Manager
     participant L as Return Queue Consumer
