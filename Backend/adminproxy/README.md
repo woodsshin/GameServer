@@ -40,10 +40,10 @@ sequenceDiagram
     box rgba(100,149,237,0.35) admin-proxy internal modules
         participant A as adminHandler
         participant H as handler
+        participant L as Return Queue Consumer
     end
     participant MQ as RabbitMQ
     participant S as Player Service / Session Manager
-    participant L as Return Queue Consumer
 
     C->>A: HTTP request (EventName, UserID header, body)
     A->>A: getFrameIdx() 로 고유 frameIdx 발급
