@@ -1,0 +1,509 @@
+"""
+Populates the CURRENTLY OPEN level with test content for the MassBubble project.
+
+How to use (Docs/WORLD_PARTITION_SETUP.md has the full walkthrough):
+  1. File > New Level > "Open World"  (a World Partition level)  and save it as /Game/Maps/L_MassBubbleWorld
+  2. Tools > Execute Python Script...  and pick this file
+     (needs the Python Editor Script Plugin, which MassBubble.uproject enables for the Editor target)
+
+What it creates
+  * one huge floor plane            always loaded ("Is Spatially Loaded" off) so the crowd has ground everywhere
+  * a grid of blocks                spatially loaded => World Partition cells hold real content that streams in and out
+  * a PlayerStart at the origin
+
+Why blocks: World Partition only has something to stream if the cells contain actors. The crowd itself is not part
+of the level (Mass entities live in a server subsystem), so without content the streaming behaviour would be invisible.
+
+Why this is no longer one simple loop
+  ~10 000 spawn_actor_from_class calls inside ONE blocking Python call make the editor look frozen: every spawn is its
+  own undo transaction, selects the new actor, notifies the Outliner / Details / World Partition windows and creates a
+  One-File-Per-Actor package, and while the call runs the editor cannot redraw, autosave or garbage collect. Now:
+    * the work is cut into time slices (RUN_MODE "tick": one slice per editor frame, the editor stays alive)
+    * one slice = one undo transaction (not one per actor)
+    * saving happens in checkpoints (SAVE_EVERY) instead of one huge save at the very end
+    * a run can be resumed: blocks that already exist (matched by label) are skipped, so running the script again
+      after an interruption never duplicates anything. Keep the parameters unchanged between the runs, and note that
+      only actors that are currently LOADED in the editor are seen (load the whole map first if you resume later).
+    * starting the script again while a run is in progress cancels that run
+    * if spawning does not work at all (Play-In-Editor running, no level open) it stops after a few failures instead
+      of flooding the log
+  For the same parameters the layout is identical to the old version (same seed, same random sequence).
+
+NOTE: written against the UE5 Python API without access to an engine. If a call is renamed in your version, the
+messages printed to the Output Log say which one. Everything optional is wrapped in try/except on purpose.
+"""
+
+import collections
+import contextlib
+import random
+import sys
+import time
+import traceback
+import types
+
+import unreal
+
+# ---- layout -------------------------------------------------------------------------------------------------
+HALF_COUNT = 50                   # (2 * 50 + 1)^2 = 10 201 grid cells (the ones next to the origin stay empty)
+SPACING_CM = 4000.0               # 40 m between blocks => the block field is about 4 km x 4 km around the origin
+JITTER_CM = 800.0                 # random offset of each block inside its cell (+-)
+FLOOR_HALF_EXTENT_CM = 400000.0   # the floor spans +-4 km (8 x 8 km), enough for the default bot orbit (600 m)
+CLEAR_RADIUS_CM = 8000.0          # keep 80 m around the origin free so the player spawns in the open
+SEED = 7
+FOLDER = "MassBubbleWorld"
+
+# ---- execution ----------------------------------------------------------------------------------------------
+# "tick" : slices of work run from the editor's Slate tick. The script returns at once, the editor keeps redrawing
+#          and stays responsive, progress goes to the Output Log. Running the script again cancels the run.
+# "modal": blocking progress dialog with a Cancel button like the old version, but sliced, so the dialog is serviced
+#          every MODAL_BUDGET_MS. Use it if you prefer to wait in front of a progress bar.
+RUN_MODE = "tick"
+TICK_BUDGET_MS = 30.0             # minimum work per editor frame in "tick" mode (see _tick_budget_s)
+TICK_BUDGET_MAX_MS = 250.0        # maximum work per editor frame in "tick" mode
+MODAL_BUDGET_MS = 200.0           # work between two progress dialog updates in "modal" mode
+LOG_EVERY = 500                   # one progress line per N created blocks
+SAVE_EVERY = 1000                 # checkpoint save after N new actors (0 = save only once at the end)
+SAVE_AFTER = True                 # save at the end of a complete run (a cancelled / failed run never saves itself)
+MAX_CONSECUTIVE_FAILURES = 5      # stop instead of flooding the log when spawning does not work at all
+
+LABEL_PREFIX = "Opt"              # everything created here is labelled OptFloor / OptPlayerStart / OptBlock_<x>_<y>
+LABEL_FLOOR = "OptFloor"
+LABEL_START = "OptPlayerStart"
+LABEL_BLOCK = "OptBlock_%d_%d"
+
+Block = collections.namedtuple("Block", "label x y width height")
+
+
+def build_plan():
+    """Every block of the layout in spawn order. Pure Python: same parameters => same list. The random numbers are
+    consumed exactly like the old single loop did, so levels generated by the old version keep their layout."""
+    rng = random.Random(SEED)
+    clear_sq = CLEAR_RADIUS_CM * CLEAR_RADIUS_CM
+    plan = []
+    for ix in range(-HALF_COUNT, HALF_COUNT + 1):
+        for iy in range(-HALF_COUNT, HALF_COUNT + 1):
+            x = ix * SPACING_CM + rng.uniform(-JITTER_CM, JITTER_CM)
+            y = iy * SPACING_CM + rng.uniform(-JITTER_CM, JITTER_CM)
+            if (x * x + y * y) < clear_sq:
+                continue
+            width = rng.uniform(8.0, 20.0)       # 8 - 20 m wide (the cube is 100 cm)
+            height = rng.uniform(4.0, 25.0)      # 4 - 25 m tall
+            plan.append(Block(LABEL_BLOCK % (ix, iy), x, y, width, height))
+    return plan
+
+
+# ---- small helpers ------------------------------------------------------------------------------------------
+
+def _disable_spatial_loading(actor):
+    """True if 'Is Spatially Loaded' is now off. C++ name bIsSpatiallyLoaded => Python is_spatially_loaded."""
+    attempts = (
+        lambda: actor.set_editor_property("is_spatially_loaded", False),
+        lambda: actor.set_is_spatially_loaded(False),   # newer API, if the property is not exposed
+    )
+    for attempt in attempts:
+        try:
+            attempt()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _save_everything():
+    """Save the level and the One-File-Per-Actor packages. Falls back to a hint if no save API is available."""
+    try:
+        return bool(unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True))   # needs 'Editor Scripting Utilities'
+    except Exception as exc:
+        unreal.log_warning("save_dirty_packages unavailable (%s), trying the level editor subsystem." % exc)
+    try:
+        level_editor = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+        return bool(level_editor.save_current_level())
+    except Exception as exc:
+        unreal.log_warning("Could not save from Python (%s). Use File > Save All (Ctrl+Shift+S)." % exc)
+    return False
+
+
+def _transaction(name):
+    """One undo transaction around a whole slice. The spawn calls open their own transaction each, which merges into
+    this one. Without it every single spawn snapshots the level's actor list for undo."""
+    scoped = getattr(unreal, "ScopedEditorTransaction", None)
+    return scoped(name) if scoped is not None else contextlib.nullcontext()
+
+
+def _editor_world_id():
+    """Path name of the open editor world, or None if it cannot be determined. Used to notice a level switch."""
+    getters = (
+        lambda: unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world(),
+        lambda: unreal.EditorLevelLibrary.get_editor_world(),
+    )
+    for getter in getters:
+        try:
+            world = getter()
+            if world is not None:
+                return world.get_path_name()
+        except Exception:
+            continue
+    return None
+
+
+def _tick_budget_s(delta_seconds):
+    """Work per editor frame: about half of the last frame time, within [TICK_BUDGET_MS, TICK_BUDGET_MAX_MS].
+    A fixed budget would crawl while the editor is throttled in the background (~3 fps); half a frame keeps the
+    editor responsive and still makes progress."""
+    return min(TICK_BUDGET_MAX_MS, max(TICK_BUDGET_MS, 500.0 * float(delta_seconds))) / 1000.0
+
+
+def _fmt_duration(seconds):
+    minutes, secs = divmod(int(seconds + 0.5), 60)
+    return "%dm %02ds" % (minutes, secs) if minutes else "%ds" % secs
+
+
+_STATE_MODULE = "opt_populate_test_world_state"
+
+
+def _state():
+    """The editor's Python interpreter outlives a single script run. A run leaves its job here, so that starting the
+    script a second time can find it (and cancel it)."""
+    module = sys.modules.get(_STATE_MODULE)
+    if module is None:
+        module = types.ModuleType(_STATE_MODULE)
+        module.job = None
+        sys.modules[_STATE_MODULE] = module
+    return module
+
+
+# ---- the job ------------------------------------------------------------------------------------------------
+
+class _PopulateJob(object):
+    """The whole run as a small state machine. step() does a bounded amount of work, so any driver (editor tick,
+    progress dialog loop) can call it again and again without ever blocking the editor for long."""
+
+    def __init__(self):
+        self.actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+        self.cube = unreal.load_asset("/Engine/BasicShapes/Cube")
+        self.plane = unreal.load_asset("/Engine/BasicShapes/Plane")
+        if self.actors is None or self.cube is None or self.plane is None:
+            raise RuntimeError("Could not load the editor actor subsystem or /Engine/BasicShapes/{Cube,Plane}.")
+
+        self.world_id = _editor_world_id()
+
+        plan = build_plan()
+        existing = self._existing_labels()
+        self.todo = [block for block in plan if block.label not in existing]
+        self.planned = len(plan)
+        self.already_there = len(plan) - len(self.todo)
+        self.need_floor = LABEL_FLOOR not in existing
+        self.need_start = LABEL_START not in existing
+
+        self.cursor = 0              # next index into todo
+        self.created = 0             # blocks created by this run
+        self.failed = 0
+        self.failure_streak = 0
+        self.unsaved = 0             # actors created since the last save
+        self.setup_done = False      # floor + PlayerStart
+        self.phase = "spawning"
+        self.busy = False            # inside step(): a nested progress dialog may tick us again, ignore that
+        self.finished = False
+        self.cancel_reason = None
+        self.tick_handle = None
+
+        self.started = time.perf_counter()
+        self.window_wall = self.started   # progress window: wall clock, blocks, time spent inside our slices
+        self.window_blocks = 0
+        self.window_work_s = 0.0
+
+    # ---- control ----
+    def request_cancel(self, reason):
+        if self.cancel_reason is None:
+            self.cancel_reason = reason
+
+    def abandon(self):
+        """Drop a run whose cancel never took effect (its tick callback got lost)."""
+        self.cancel_reason = self.cancel_reason or "abandoned"
+        self.finished = True
+        self.release_tick()
+
+    def release_tick(self):
+        if self.tick_handle is not None:
+            try:
+                unreal.unregister_slate_post_tick_callback(self.tick_handle)
+            except Exception as exc:
+                unreal.log_warning("PopulateTestWorld: could not unregister the tick callback (%s)." % exc)
+            self.tick_handle = None
+
+    def fail_hard(self, reason):
+        """Unexpected exception: stop for good, never save."""
+        self.request_cancel(reason)
+        try:
+            self._log_summary()
+        finally:
+            self.finished = True
+
+    # ---- info ----
+    def log_start(self, mode):
+        floor_km = 2.0 * FLOOR_HALF_EXTENT_CM / 100000.0
+        field_km = 2.0 * HALF_COUNT * SPACING_CM / 100000.0
+        unreal.log("PopulateTestWorld: %d blocks to create (%d planned, %d already in the level). Floor %.1f x %.1f km, "
+                   "block field about %.1f x %.1f km. Mode '%s', checkpoint save every %d actors." % (
+                       len(self.todo), self.planned, self.already_there, floor_km, floor_km, field_km, field_km,
+                       mode, SAVE_EVERY))
+        if mode != "modal":
+            unreal.log("PopulateTestWorld: running in the background. The editor stays usable, but do not select or "
+                       "move actors meanwhile. Progress is logged here; run the script again to cancel.")
+
+    def status_text(self):
+        return "Block %d / %d" % (self.created, len(self.todo))
+
+    def save_due(self):
+        return SAVE_EVERY > 0 and self.unsaved >= SAVE_EVERY and self._has_work()
+
+    # ---- work ----
+    def step(self, budget_s):
+        """Does about budget_s seconds of work. Returns the number of blocks created."""
+        if self.finished or self.busy:
+            return 0
+        self.busy = True
+        try:
+            return self._step(budget_s)
+        finally:
+            self.busy = False
+
+    def _has_work(self):
+        return (not self.setup_done) or self.cursor < len(self.todo)
+
+    def _step(self, budget_s):
+        if self.cancel_reason is None and self.world_id is not None and _editor_world_id() != self.world_id:
+            self.cancel_reason = "the open level changed while the script was running"
+        if self.cancel_reason is not None or not self._has_work():
+            self._finish()
+            return 0
+        if self.save_due():
+            self._save("checkpoint")     # its own slice, never inside the undo transaction
+            return 0
+        return self._spawn_some(budget_s)
+
+    def _spawn_some(self, budget_s):
+        start = time.perf_counter()
+        deadline = start + budget_s
+        before = self.created
+        with _transaction("Populate Test World"):
+            if not self.setup_done:
+                self._setup()
+                self.setup_done = True
+            while self.cursor < len(self.todo) and self.cancel_reason is None:
+                block = self.todo[self.cursor]
+                self.cursor += 1
+                self._spawn_block(block)
+                if time.perf_counter() >= deadline:
+                    break
+        self._clear_selection()
+        self.window_work_s += time.perf_counter() - start
+        self._maybe_log()
+        return self.created - before
+
+    def _setup(self):
+        if self.need_floor:
+            scale_xy = (2.0 * FLOOR_HALF_EXTENT_CM) / 100.0   # the engine plane is 100 x 100 cm
+            floor = self._spawn_mesh(self.plane, unreal.Vector(0.0, 0.0, 0.0),
+                                     unreal.Vector(scale_xy, scale_xy, 1.0), LABEL_FLOOR)
+            self._note(floor is not None)
+            if floor is not None:
+                self.unsaved += 1
+                # The floor is bigger than any cell. It must not be assigned to (and loaded with) one cell.
+                if not _disable_spatial_loading(floor):
+                    unreal.log_warning("OptFloor: could not disable 'Is Spatially Loaded'. "
+                                       "Select OptFloor and untick it in Details > World Partition.")
+        if self.need_start:
+            start = None
+            try:
+                start = self.actors.spawn_actor_from_class(unreal.PlayerStart, unreal.Vector(0.0, 0.0, 300.0))
+                if start is not None:
+                    start.set_actor_label(LABEL_START)
+            except Exception as exc:
+                unreal.log_warning("%s: %s" % (LABEL_START, exc))
+            self._note(start is not None)
+            if start is not None:
+                self.unsaved += 1
+
+    def _spawn_block(self, block):
+        actor = self._spawn_mesh(
+            self.cube,
+            unreal.Vector(block.x, block.y, block.height * 50.0),      # cube pivot is in the middle
+            unreal.Vector(block.width, block.width, block.height),
+            block.label)
+        self._note(actor is not None)
+        if actor is not None:
+            self.created += 1
+            self.unsaved += 1
+
+    def _spawn_mesh(self, mesh, location, scale, label):
+        actor = None
+        try:
+            actor = self.actors.spawn_actor_from_class(unreal.StaticMeshActor, location)
+            if actor is None:
+                unreal.log_warning("%s: spawn_actor_from_class returned None." % label)
+                return None
+            actor.set_actor_label(label)
+            actor.set_actor_scale3d(scale)
+            actor.static_mesh_component.set_static_mesh(mesh)
+        except Exception as exc:
+            unreal.log_warning("%s: %s" % (label, exc))
+            if actor is not None:
+                try:    # do not leave a half configured default cube behind
+                    self.actors.destroy_actor(actor)
+                except Exception:
+                    pass
+            return None
+        try:
+            actor.set_folder_path(FOLDER)
+        except Exception:  # cosmetic only (Outliner folder)
+            pass
+        return actor
+
+    def _note(self, ok):
+        if ok:
+            self.failure_streak = 0
+            return
+        self.failed += 1
+        self.failure_streak += 1
+        if self.failure_streak >= MAX_CONSECUTIVE_FAILURES and self.cancel_reason is None:
+            self.cancel_reason = ("%d spawns failed in a row (Play-In-Editor running? no level open? see the warnings "
+                                  "above)" % self.failure_streak)
+
+    def _clear_selection(self):
+        # Every spawn selects the new actor. Do not leave the last one selected: the Details panel would keep
+        # rebuilding for it.
+        try:
+            self.actors.set_selected_level_actors([])
+        except Exception:
+            pass
+
+    def _existing_labels(self):
+        labels = set()
+        for actor in self.actors.get_all_level_actors():
+            try:
+                label = actor.get_actor_label()
+            except Exception:
+                continue
+            if label.startswith(LABEL_PREFIX):
+                labels.add(label)
+        return labels
+
+    def _save(self, kind):
+        unreal.log("PopulateTestWorld: saving (%s), %d new actors since the last save. This can take a while..." % (
+            kind, self.unsaved))
+        self.phase = "saving"
+        began = time.perf_counter()
+        ok = _save_everything()
+        unreal.log("PopulateTestWorld: %s (%s)." % (
+            "saved" if ok else "NOT saved - use File > Save All (Ctrl+Shift+S)", _fmt_duration(time.perf_counter() - began)))
+        self.phase = "spawning"
+        if ok:
+            self.unsaved = 0
+        self.window_wall = time.perf_counter()   # keep the save out of the ETA estimate
+
+    def _maybe_log(self):
+        blocks = self.created - self.window_blocks
+        if blocks < LOG_EVERY:
+            return
+        now = time.perf_counter()
+        wall = max(now - self.window_wall, 1.0e-6)
+        remaining = len(self.todo) - self.cursor
+        unreal.log("PopulateTestWorld: %d / %d blocks (%.0f%%), %.1f ms per block inside the editor call, ETA %s" % (
+            self.created, len(self.todo), 100.0 * self.created / max(1, len(self.todo)),
+            1000.0 * self.window_work_s / blocks, _fmt_duration(remaining * wall / blocks)))
+        self.window_wall = now
+        self.window_blocks = self.created
+        self.window_work_s = 0.0
+
+    def _finish(self):
+        if self.finished:
+            return
+        try:
+            if self.cancel_reason is None and SAVE_AFTER and self.unsaved > 0:
+                self._save("final")
+            self._log_summary()
+        finally:
+            self.finished = True
+
+    def _log_summary(self):
+        elapsed = _fmt_duration(time.perf_counter() - self.started)
+        unsaved_hint = ""
+        if self.unsaved > 0:
+            unsaved_hint = " %d actors are not saved yet: File > Save All (Ctrl+Shift+S)." % self.unsaved
+        if self.cancel_reason is None:
+            unreal.log("PopulateTestWorld: finished in %s. %d blocks created, %d failed, %d were already there.%s" % (
+                elapsed, self.created, self.failed, self.already_there, unsaved_hint))
+        else:
+            unreal.log_warning(
+                "PopulateTestWorld: STOPPED after %s (%s). %d blocks created, %d still missing.%s "
+                "Run the script again to continue: blocks that already exist are skipped." % (
+                    elapsed, self.cancel_reason, self.created, len(self.todo) - self.created, unsaved_hint))
+
+
+# ---- drivers ------------------------------------------------------------------------------------------------
+
+def _start_tick_driver(job):
+    def on_tick(delta_seconds):
+        if job.finished:
+            job.release_tick()
+            return
+        if job.busy:
+            return      # we are inside a dialog opened by one of our own calls (the save): do not re-enter
+        try:
+            job.step(_tick_budget_s(delta_seconds))
+        except Exception:
+            unreal.log_error("PopulateTestWorld: unexpected error, run aborted.\n" + traceback.format_exc())
+            job.fail_hard("unexpected error")
+        if job.finished:
+            job.release_tick()
+
+    job.tick_handle = unreal.register_slate_post_tick_callback(on_tick)
+
+
+def _run_modal(job):
+    with unreal.ScopedSlowTask(max(1, len(job.todo)), "Populating World Partition test content") as task:
+        task.make_dialog(True)
+        reported = 0
+        while not job.finished:
+            if task.should_cancel():
+                job.request_cancel("cancelled in the progress dialog")
+            if job.save_due():
+                task.enter_progress_frame(0, "Saving checkpoint...")
+            try:
+                job.step(MODAL_BUDGET_MS / 1000.0)
+            except Exception:
+                unreal.log_error("PopulateTestWorld: unexpected error, run aborted.\n" + traceback.format_exc())
+                job.fail_hard("unexpected error")
+                break
+            task.enter_progress_frame(job.created - reported, job.status_text())
+            reported = job.created
+
+
+def main():
+    state = _state()
+    previous = state.job
+    if previous is not None and not previous.finished:
+        if previous.cancel_reason is None:
+            previous.request_cancel("the script was started again")
+            unreal.log_warning("PopulateTestWorld: a run is still in progress. Cancel requested; it stops within a "
+                               "moment. Start the script once more to continue where it stopped.")
+            return
+        previous.abandon()      # a cancel was requested before but never took effect: start fresh
+
+    mode = str(RUN_MODE).lower()
+    if mode != "modal" and not hasattr(unreal, "register_slate_post_tick_callback"):
+        unreal.log_warning("PopulateTestWorld: no Slate tick callback in this engine version, using 'modal'.")
+        mode = "modal"
+
+    job = _PopulateJob()
+    state.job = job
+    job.log_start(mode)
+
+    if mode == "modal":
+        _run_modal(job)
+    else:
+        _start_tick_driver(job)
+
+
+main()

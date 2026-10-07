@@ -1,4 +1,4 @@
-# MassBubble - UE 5.8 MassEntity
+# MassBubble - World Partition + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
 
 **Unreal Engine 5.8 데디케이티드 대규모 서버 최적화 샘플**
 
