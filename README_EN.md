@@ -3,7 +3,7 @@
 
 A collection of projects centered on Network Programming and Game Engine Middleware. Each project is organized like an independent repository, and detailed implementation notes and verification results can be found via the links below.
 
-**Seedworld**([@SeedworldMeta](https://x.com/SeedworldMeta)) is a Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server with AWS GameLift and integrates with a custom gRPC matchmaking backend. The three projects under **UnrealPlugins** (OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP) are all Native Code Plugins/Modules that run on an Unreal Engine Dedicated Server (and Client) that I implemented myself. **Backend** is likewise described with a focus on the microservices I personally developed; microservices co-developed with full-stack engineers are not included. **Kiraverse** ([@Kiraversegame](https://x.com/Kiraversegame)) is the combat core of a PvP multiplayer game built on Unreal Engine 5.4's Gameplay Ability System (GAS); only the gameplay core of the competitive mode (the GAS-based combat system and the bomb plant/defuse round loop) is excerpted here for portfolio purposes.
+**Seedworld**([@SeedworldMeta](https://x.com/SeedworldMeta)) is a Game Mode/Subsystem layer that auto-scales an Unreal Engine Dedicated Server with AWS GameLift and integrates with a custom gRPC matchmaking backend. The three projects under **UnrealPlugins** (OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP) are all Native Code Plugins/Modules that run on an Unreal Engine Dedicated Server (and Client) that I implemented myself. **Backend** is likewise described with a focus on the microservices I personally developed; microservices co-developed with full-stack engineers are not included. **Kiraverse** ([@Kiraversegame](https://x.com/Kiraversegame)) is the combat core of a PvP multiplayer game built on Unreal Engine 5.4's Gameplay Ability System (GAS); only the gameplay core of the competitive mode (the GAS-based combat system and the bomb plant/defuse round loop) is excerpted here for portfolio purposes. **MassBubble** is a server optimization sample that simulates a large NPC population on a Dedicated Server using Unreal Engine 5.8's Mass Entity and World Partition, and replicates it per player at the AOI (Area of Interest) level through the Iris replication system.
 
 | Project | Summary | Stack |
 |---|---|---|
@@ -13,6 +13,7 @@ A collection of projects centered on Network Programming and Game Engine Middlew
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README_EN.md) | A Native Code Plugin that wraps Epic Online Services in Unreal Engine's standard `OnlineSubsystem` interface | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README_EN.md) | A Native Code Plugin that automatically registers port forwarding on a router via the UPnP IGD protocol | Unreal Engine, C++, SSDP/SOAP |
 | [Kiraverse](./Kiraverse/README_EN.md) | A C++ multiplayer gameplay core built on Unreal Engine 5.4's Gameplay Ability System (GAS). Implements a Hitscan/Projectile weapon-swap architecture and a Bomb Defusal (plant/defuse) round loop, Bot PvP | Unreal Engine, C++, Gameplay Ability System |
+| [MassBubble](./MassBubble/README_EN.md) | Mass Entity-based large-scale NPC server simulation (LOD, time-slicing, parallel processing) with per-player AOI replication (Iris, Push Model, FastArray, dead reckoning, 10 B quantized records) and client-side ISM batched rendering | Unreal Engine 5.8, C++, Mass Entity, World Partition, Iris, Push Model Replication |
 
 ---
 
@@ -47,8 +48,9 @@ flowchart TD
 - **OnlineSubsystemEOS** is a middleware layer mounted on an Unreal Engine Dedicated Server/Client that integrates Epic's backend services (authentication, session, matchmaking, P2P) into the engine's standard interface within the Unreal Engine ecosystem. It leverages EOS's own P2P NAT traversal and relay fallback.
 - **SimpleUPNP** is a plugin usable on both the Unreal Engine client and Dedicated Server. Using only a plain protocol (UPnP) with no backend service. It opens a port directly on the router of the PC it's running on, offering a more fundamental (low-level) solution for establishing a fully relay-free P2P path.
 - **Kiraverse** is the layer that structures and synchronizes the actual gameplay and combat logic such as GAS-based abilities, weapon swapping, and bomb defusal round loops, Bot PvP with the client on an established session under server authority.
+- **MassBubble** is a server optimization sample that simulates thousands to tens of thousands of NPCs on a Dedicated Server while replicating only each player's surrounding area (AOI), designed so that server CPU, bandwidth, and client rendering costs each have an observable upper bound. Every optimization can be toggled individually through a CVar kill switch for A/B measurement, and the pure logic is verified with Automation Tests.
 
-Through these five projects, the goal was to demonstrate an understanding of both the P2P and Dedicated Server models, the ability to implement distributed backend services alongside their corresponding client-side protocols, and problem-solving at the game engine middleware/network protocol level.
+Through these six projects, the goal was to demonstrate an understanding of both the P2P and Dedicated Server models, the ability to implement distributed backend services alongside their corresponding client-side protocols, problem-solving at the game engine middleware/network protocol level, and the ability to optimize simulation and replication for large-scale Dedicated Servers.
 
 ---
 
@@ -152,6 +154,21 @@ Where the five projects above address establishing a communication path between 
 
 ---
 
+## MassBubble
+
+A reference implementation of a pipeline that simulates a large NPC population on a Dedicated Server using Unreal Engine 5.8's **Mass Entity** and **World Partition**, and replicates **only the area around each player (AOI)** to every connected client. It is designed so that server CPU (simulation), server bandwidth (replication), and client rendering costs each have an observable upper bound as the NPC count grows. AI, animation, and anti-cheat are out of scope; the NPC logic is just a workload for validating the pipeline.
+
+**Key Design**
+- **Data-oriented simulation**: Fragments are split by access pattern, and LOD is stored as a Fragment value rather than a Tag, which eliminates structural changes. With distance-based LOD + time-slicing + `ParallelForEachEntityChunk`, only about 830 of 10,000 agents actually run movement per frame under default settings (analytical estimate).
+- **Region-owned state streaming**: NPC state is owned by Regions in a server subsystem rather than by Actors, decoupling its lifecycle from World Partition cell unload/reload. Supports frame-budgeted spawn/despawn and deterministic restore.
+- **One-Actor-per-player AOI replication** (`ACrowdBubble`): `bOnlyRelevantToOwner` + `COND_OwnerOnly` + Push Model + FastArray delta eliminate per-NPC ActorChannels. int16/int8 quantization with 200 m lattice origin rebasing yields 10 B per agent (−81% vs. ≈ 52 B naive), and dead reckoning reduces resends for agents moving in a straight line at constant velocity to zero. Because it uses a standard FastArray definition, it runs on both **Iris** and the legacy NetDriver (switchable with `-UseIrisReplication=0/1`); since Iris addresses array elements by index, an item moved by a swap-remove is refreshed with its current state and resent.
+- **Client rendering**: Extrapolation + exponential smoothing, then a single ISM batch update per frame. The rendering code lives in a `ClientOnly` module and is not included in the server target.
+- **Measurement and verification**: A/B measurement via CVar kill switches, integrated stat / CSV Profiler / Unreal Insights instrumentation, and 4 Automation Tests that assert agreement with a brute-force oracle, the int16 invariant, and dead reckoning sending under 15% of the naive message count.
+
+→ See [MassBubble/README_EN.md](./MassBubble/README_EN.md) for details.
+
+---
+
 ## Directory Structure
 
 ```
@@ -178,6 +195,11 @@ Where the five projects above address establishing a communication path between 
 │       ├── Weapon/            (Weapon base, Hitscan/Projectile, WeaponComponent)
 │       ├── Bomb/              (Bomb actor, BombSite, BombComponent)
 │       └── Game/              (GameMode/GameState/PlayerState, round loop)
+├── MassBubble/
+│   ├── README_EN.md
+│   └── Source/
+│       ├── MassBubble/        (server/shared module: Crowd/ simulation, regions, processors; Net/ replication, quantization; Game/, World/, Core/ instrumentation)
+│       └── MassBubbleRender/  (ClientOnly module: ISM rendering subsystem, render settings)
 ├── Seedworld/
 │   ├── README_EN.md
 │   └── Source/

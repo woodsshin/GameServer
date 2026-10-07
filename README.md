@@ -3,7 +3,7 @@
 
 Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 모음입니다. 각 프로젝트는 독립된 Repository처럼 구성되어 있으며, 하단 링크에서 세부 구현과 검증 결과를 확인할 수 있습니다.
 
-**Seedworld**([@SeedworldMeta](https://x.com/SeedworldMeta))는 Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드와 연동하는 Game Mode/Subsystem 계층입니다. **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다. **Kiraverse**([@Kiraversegame](https://x.com/Kiraversegame))는 Unreal Engine 5.4의 Gameplay Ability System(GAS)을 기반으로 구현한 PvP 멀티플레이어 게임의 전투 코어이며, 경쟁 모드의 게임플레이 코어(GAS 기반 전투 시스템, 폭탄 설치·해체 라운드 루프)만 포트폴리오 목적으로 발췌했습니다.
+**Seedworld**([@SeedworldMeta](https://x.com/SeedworldMeta))는 Unreal Engine Dedicated Server를 AWS GameLift로 Auto-scaling하고, 자체 gRPC 매치메이킹 백엔드와 연동하는 Game Mode/Subsystem 계층입니다. **UnrealPlugins** 하위의 세 프로젝트(OnlineSubsystemEOS, OnlineSubsystemIcarus([Steam on ICARUS](https://store.steampowered.com/app/1149460/ICARUS/)), SimpleUPNP)는 모두 직접 구현한 Unreal Engine Dedicated Server(및 Client)에서 동작하는 Native Code Plugin/Module입니다. **Backend**의 경우도 직접 개발한 microservice를 중심으로 설명하였습니다. 풀스택 엔지니어와 공동으로 개발한 microservice는 포함하지 않았습니다. **Kiraverse**([@Kiraversegame](https://x.com/Kiraversegame))는 Unreal Engine 5.4의 Gameplay Ability System(GAS)을 기반으로 구현한 PvP 멀티플레이어 게임의 전투 코어이며, 경쟁 모드의 게임플레이 코어(GAS 기반 전투 시스템, 폭탄 설치·해체 라운드 루프)만 포트폴리오 목적으로 발췌했습니다. **MassBubble**은 Unreal Engine 5.8의 Mass Entity와 World Partition을 기반으로 대규모 NPC를 Dedicated Server에서 시뮬레이션하고, 플레이어별 AOI(Area of Interest) 단위로 Iris 복제 시스템을 통해 복제하는 서버 최적화 샘플입니다.
 
 | Project | 요약 | Stack |
 |---|---|---|
@@ -13,6 +13,7 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README.md) | Epic Online Services를 Unreal Engine의 표준 `OnlineSubsystem` Interface로 wrapping한 Native Code Plugin | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
 | [Kiraverse](./Kiraverse/README.md) | Unreal Engine 5.4의 Gameplay Ability System(GAS) 기반 C++ 멀티플레이어 게임플레이 코어. Hitscan/Projectile 무기 교체 구조와 폭탄 설치·해체(Bomb Defusal) 라운드 루프, 봇 PvP 구현 | Unreal Engine, C++, Gameplay Ability System |
+| [MassBubble](./MassBubble/README.md) | Mass Entity 기반 대규모 NPC 서버 시뮬레이션(LOD·time-slicing·병렬 처리)과 플레이어별 AOI 복제(Iris·Push Model·FastArray·Dead reckoning·10 B 양자화), 클라이언트 ISM 배칭 렌더링 | Unreal Engine 5.8, C++, Mass Entity, World Partition, Iris, Push Model Replication |
 
 ---
 
@@ -47,8 +48,9 @@ flowchart TD
 - **OnlineSubsystemEOS**는 Unreal Engine Dedicated Server/Client에 탑재되어, Unreal Engine 생태계 안에서 Epic의 Backend Service(인증, Session, matchmaking, P2P)를 엔진 표준 Interface로 통합하는 Middleware Layer입니다. EOS 자체의 P2P NAT Traversal과 Relay Fallback을 활용합니다.
 - **SimpleUPNP**는 Unreal Engine Client와 Dedicated Server 양쪽에서 모두 사용 가능한 Plugin으로, Backend Service 없이 순수 Protocol(UPnP)만으로 실행 중인 PC의 Router에 직접 Port를 열어, Relay Server 없는 완전한 P2P 경로를 확보하는 더 근본적인(low-level) 해법입니다.
 - **Kiraverse**는 성립된 Session 위에서 실제로 실행되는 Gameplay/Combat 로직(GAS 기반 어빌리티, 무기 교체, 폭탄 설치·해체 라운드 루프, 봇 PvP)을 서버 권위 하에 구조화하고 클라이언트와 동기화하는 계층입니다.
+- **MassBubble**은 수천~수만 규모의 NPC를 Dedicated Server에서 시뮬레이션하면서 각 플레이어에게 주변 영역(AOI)만 복제할 때, 서버 CPU · 대역폭 · 클라이언트 렌더링 비용이 모두 관측 가능한 상한을 갖도록 설계한 서버 최적화 샘플입니다. 모든 최적화를 CVar Kill Switch로 개별 on/off하여 A/B 계측하고, 순수 로직은 Automation Test로 검증합니다.
 
-다섯 프로젝트를 통해 P2P/Dedicated Server 양쪽 모델에 대한 이해, 분산 Backend Service 및 그에 대응하는 Client-side Protocol 구현 역량, Game Engine Middleware/Network Protocol Level의 문제 해결 역량을 함께 보이는 것을 목표로 했습니다.
+여섯 프로젝트를 통해 P2P/Dedicated Server 양쪽 모델에 대한 이해, 분산 Backend Service 및 그에 대응하는 Client-side Protocol 구현 역량, Game Engine Middleware/Network Protocol Level의 문제 해결 역량, 대규모 Dedicated Server의 시뮬레이션 · 복제 최적화 역량을 함께 보이는 것을 목표로 했습니다.
 
 ---
 
@@ -152,6 +154,21 @@ Kiraverse([@Kiraversegame](https://x.com/Kiraversegame))는 PvP 모드로 플레
 
 ---
 
+## MassBubble
+
+Unreal Engine 5.8의 **Mass Entity**와 **World Partition**을 기반으로 대규모 NPC를 Dedicated Server에서 시뮬레이션하고, 접속한 각 플레이어에게 **자기 주변(AOI)만** 복제하는 파이프라인의 레퍼런스 구현입니다. NPC 규모가 커져도 서버 CPU(시뮬레이션), 서버 대역폭(복제), 클라이언트 렌더링 세 비용이 모두 관측 가능한 상한을 갖도록 설계했습니다. AI·애니메이션·안티치트는 범위 밖이며, NPC 로직은 파이프라인 검증용 워크로드입니다.
+
+**핵심 설계**
+- **Data-oriented 시뮬레이션**: Fragment를 접근 패턴 단위로 분리하고, LOD를 Tag가 아닌 Fragment 값으로 저장해 structural change를 제거했습니다. 거리 기반 LOD + time-slicing + `ParallelForEachEntityChunk`로, 기본 설정에서 10,000 agent 중 프레임당 실제 이동 연산은 약 830건입니다(해석적 추정).
+- **Region 소유 상태 스트리밍**: NPC 상태를 Actor가 아닌 서버 서브시스템의 Region이 소유해 World Partition 셀 unload/reload와 생명주기를 분리했습니다. 프레임 버짓 기반 spawn/despawn과 결정론적 복원을 지원합니다.
+- **플레이어당 Actor 1개 AOI 복제**(`ACrowdBubble`): `bOnlyRelevantToOwner` + `COND_OwnerOnly` + Push Model + FastArray delta로 NPC별 ActorChannel을 제거했습니다. int16/int8 양자화와 200 m 격자 origin rebasing으로 agent당 10 B(naive ≈ 52 B 대비 −81%), Dead reckoning으로 등속 직진 agent의 재전송을 0으로 줄였습니다. 표준 FastArray 정의를 사용해 **Iris**와 legacy NetDriver 양쪽에서 동작하며(`-UseIrisReplication=0/1`로 전환), Iris는 배열 원소를 index로 주소 지정하므로 swap-remove로 자리가 바뀐 item을 현재 상태로 갱신해 다시 보내도록 처리했습니다.
+- **클라이언트 렌더링**: 외삽 + 지수 보간 후 단일 ISM에 batch update 1회로 그립니다. 렌더 코드는 `ClientOnly` 모듈로 분리해 서버 타깃에 포함되지 않습니다.
+- **측정과 검증**: CVar Kill Switch 기반 A/B 측정, stat / CSV Profiler / Unreal Insights 통합 계측, brute-force oracle 비교 · int16 불변식 · Dead reckoning 메시지 15% 미만을 assert하는 Automation Test 4종.
+
+→ 자세한 내용은 [MassBubble/README.md](./MassBubble/README.md) 참고.
+
+---
+
 ## Directory 구조
 
 ```
@@ -178,6 +195,11 @@ Kiraverse([@Kiraversegame](https://x.com/Kiraversegame))는 PvP 모드로 플레
 │       ├── Weapon/            (무기 베이스, Hitscan/Projectile, WeaponComponent)
 │       ├── Bomb/              (폭탄 액터, BombSite, BombComponent)
 │       └── Game/              (GameMode/GameState/PlayerState, 라운드 루프)
+├── MassBubble/
+│   ├── README.md
+│   └── Source/
+│       ├── MassBubble/        (서버/공용 모듈: Crowd/ 시뮬레이션·Region·Processor, Net/ 복제·양자화, Game/, World/, Core/ 계측)
+│       └── MassBubbleRender/  (ClientOnly 모듈: ISM 렌더링 서브시스템, 렌더 설정)
 ├── Seedworld/
 │   ├── README.md
 │   └── Source/
