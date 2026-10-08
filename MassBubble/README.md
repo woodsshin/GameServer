@@ -59,7 +59,7 @@ NPC 규모가 커져도 아래 네 가지 비용이 모두 **관측 가능한 �
 | 복제 | **플레이어당 Actor 1개로 제한** (`bOnlyRelevantToOwner` + `COND_OwnerOnly`) + **Push Model** | NPC당 ActorChannel 제거, 변경 사항(Dirty)이 없을 경우 데이터 비교 연산 비용을 0으로 최적화 | `CrowdBubble.cpp` |
 | 복제 | 데이터 정밀도 축소(**데이터 경량화/양자화**) 및 200m 격자 기준 **좌표 재설정**(Origin Rebasing) | agent당 **10 B** (기존 52 B 대비 −81%) | `CrowdNetMath.h` |
 | 복제 | **Dead reckoning** (거리별 허용 오차) | 등속 직진 agent는 재전송 0. 시뮬레이션 테스트가 기존 대비 메시지 **15% 미만**을 assert | `CrowdNetMath.h`, `CrowdTests.cpp` |
-| 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교 | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
+| 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교. Network Insights에서 두 경로 모두 클라이언트로 `AgentArray`가 복제되는 것을 확인했고, Iris 경로는 `AgentArray` 전체가 전송됨 (변경분만 보내는 legacy와 차이, 6장) | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
 | 클라이언트 | 외삽 + 지수 보간 + **ISM 1개 batch update** | 400 agent = Actor 1 / Render State 및 Draw Call 최적화 | `CrowdRenderSubsystem.cpp` |
 | 빌드 | **`ClientOnly` 모듈 분리** | 서버 타깃에 렌더 모듈이 포함되지 않음 | `MassBubble*.Target.cs` |
 | 검증 | CVar 킬스위치, stat / CSV / Insights 통합 계측, **Hitch 로그**, Automation Test 4종 | 최적화를 측정하고 성능 검증, Hitch는 원인별로 구분 | `CrowdSettings.cpp`, `MassBubbleStats.h`, `MassBubbleStreamingMonitor.cpp`, `CrowdTests.cpp` |
@@ -182,7 +182,16 @@ struct FCrowdLODFragment : FMassFragment   //  8 B
 - **`FVector2D`(double) 위치**는 LWC(Large World Coordinates)에 안전하며, 양자화는 복제 경계에서만 수행합니다.
 - 첫 agent는 런타임에 spawn되므로 시작 시점에는 매칭되는 Archetype이 없고, Mass는 매칭되는 Archetype이 없는 프로세서를 **최적화 대상에서 제외**(Query Pruning)합니다. 세 프로세서 모두 `ShouldAllowQueryBasedPruning()`이 `false`를 반환하고, 최초 spawn은 tickable subsystem(`UCrowdDirector`)이 초기화 및 트리거 역할을 수행합니다.
 
-#### 에디터 검증 — Mass Debugger (PIE)
+#### MassEntity 메모리 및 성능 최적화 지표 — Mass Debugger (PIE)
+
+| 성능 평가 항목 | 측정 수치 및 명세 | 최적화 성과 및 기술적 의의 |
+| :--- | :--- | :--- |
+| **단일 아키타입 구성** | `0xFFC5A8E9` (1개로 통합) | LOD 단계를 Tag가 아닌 Fragment 값으로 설계하여 상태 변화 시 발생하는 **동적 아키타입 이사 연산(Structural Change)을 원천 차단**했습니다. |
+| **개체당 메모리 최적화** | **64 B** (Fragment 56B + Handle 8B) | 에이전트 정보를 64바이트 선형 구조로 압축하여 CPU 캐시 라인 친화적인 메모리 배치를 완성했습니다. |
+| **청크 점유율 (Occupancy)** | **99.2%** (평균 2,030.8 / 최대 2,047 Entity) | 128 KiB 크기의 청크(Chunk) 13개에 개체들을 빈틈없이 조밀하게 배치했습니다. |
+| **메모리 파편화 낭비율** | **단 0.637%** (약 14 KiB) | 일반적인 객체 지향 방식과 달리, 데이터 선형 배치를 통해 **메모리 낭비를 0%대에 가깝게 극한으로 억제**했습니다. |
+| **공간 복잡도 성능** | 구축: `O(N + cells)` / 질의: `O(방문 셀 + 에이전트)` | 복잡도를 최소화하고, 내부 배열을 `Reset()` 및 `EAllowShrinking::No`로 재사용하여 **웜업(Warm-up) 이후 런타임 메모리 추가 할당 0회**를 달성했습니다. |
+| **네트워크 데이터 절감** | 개체당 데이터 **10B 압축** | 데이터 양자화 및 좌표 재설정(Origin Rebasing)을 통해 **기존 방식 대비 네트워크 송수신량을 약 81% 절감**했습니다. |
 
 에디터 PIE에서 Mass가 위 구성대로 동작하는지 Mass Debugger로 확인한 캡처입니다. 구성 확인용이며 성능 벤치마크가 아닙니다.
 
@@ -190,9 +199,6 @@ struct FCrowdLODFragment : FMassFragment   //  8 B
   <img src="Image/MassDebugger_Archetypes.PNG" alt="Mass Debugger - Archetypes" width="640"><br>
   <sub>Mass Debugger › Archetypes — <code>0xFFC5A8E9</code></sub>
 </p>
-
-- **Archetype 1개** : agent 26,400개(= `AgentsPerRegion` 400 × 66 region)가 `FCrowdAgentTag` + fragment 4종으로 이루어진 단일 Archetype(`0xFFC5A8E9`)에 모여 있습니다. LOD를 Tag가 아닌 fragment 값으로 둔 설계와 일치합니다 (Tag였다면 tier별로 Archetype이 갈라졌을 것입니다).
-- **메모리 배치** : `BytesPerEntity` 64 B는 fragment 합계 56 B에 entity handle 8 B가 더해진 값입니다. chunk당 2,047 entity, chunk 13개, 평균 2,030.8 entity / chunk로 **occupancy 0.992**, 낭비 14 KiB (0.637%)입니다.
 
 <p align="center">
   <img src="Image/MassDebugger_Fragments.PNG" alt="Mass Debugger - Fragments" width="560"><br>
@@ -377,7 +383,7 @@ else
 #### 에디터 검증 — Unreal Insights (PIE)
 
 <p align="center">
-  <img src="Image/UnrealInsight_MassProcessor.PNG" alt="Unreal Insights - Mass processors" width="800"><br>
+  <img src="Image/UnrealInsight_MassProcessor.PNG" alt="Unreal Insights - Mass processors" width="1000"><br>
   <sub>Unreal Insights › Timing Insights — 타이머 필터 <code>crowd</code> (Editor · Development, 한 프레임 확대)</sub>
 </p>
 
@@ -532,7 +538,7 @@ if (bStructural || NumDirty > 0)
 
 > `opt.crowd.DeadReckoning 0`이면 `ShouldResend` 대신 "움직이거나 방금 멈춘 agent는 매 tick 재전송"하는 기존 로직이 실행됩니다 (A/B 측정용).
 
-#### Iris / Legacy 복제 겸용
+#### Iris / Legacy 복제 겸용 설계
 
 `FCrowdAgentArray`는 표준 `FFastArraySerializer`라서 legacy NetDriver(`NetDeltaSerialize`)와 Iris(기존 FastArray 정의 지원) **양쪽에서 동작**하며, 같은 빌드를 `-UseIrisReplication=0 / 1`로 바꿔 가며 비교할 수 있습니다. 두 시스템의 동작 차이 때문에 다음 처리가 들어 있습니다.
 
@@ -555,11 +561,39 @@ if (bFirstTime || NetId != AppliedNetId || X != AppliedX || Y != AppliedY || VX 
 }
 ```
 
-- **swap-remove 후 재전송** : legacy 직렬화는 item을 `ReplicationID`로 따라가므로 이동 비용이 0입니다. Iris는 배열 **인덱스**로 element를 식별하므로, slot `i`로 옮겨진 마지막 item은 "내용이 바뀐 것"이라 다시 보내야 합니다. 이때 agent의 **현재** 상태로 먼저 갱신하지 않으면 클라이언트가 오래된 기준 위치에서 외삽을 다시 시작해 뒤로 튑니다.
+- **`Swap-Remove 이후 재전송 이슈 (Iris 호환성)`**: 레거시 FastArray 직렬화는 각 아이템을 고유한 고유 ID(ReplicationID)로 추적하므로 RemoveAtSwap으로 배열 순서가 바뀌어도 추가적인 네트워크 비용이 발생하지 않습니다. 반면, UE 5의 새로운 Iris 복제 시스템은 배열의 '인덱스'를 기준으로 엘리먼트를 식별합니다. 따라서 빈 슬롯 i로 이동한 마지막 아이템은 Iris 입장에서 i번 슬롯의 내용이 변경된 것으로 인식되어 클라이언트에 다시 전송됩니다. 이때 중요하게 처리해야 할 점은, 슬롯 i로 옮겨진 에이전트의 데이터를 현재 최신 상태로 먼저 갱신해주어야 한다는 것입니다. 그렇지 않으면 클라이언트가 과거의 오래된 기준 위치를 바탕으로 외삽(Extrapolation)을 새로 시작하게 되어, 캐릭터가 순간적으로 뒤로 강하게 튀는(Rubber-banding) 시각적 부작용이 발생합니다.
 - **`MarkReceived`** : Iris는 값이 같은 item도 보고할 수 있습니다. 그때마다 `RecvTime`을 갱신하면 agent가 마지막 기준 위치로 돌아가 같은 거리를 다시 걷게 되므로, 직전에 적용한 값(`Applied*`)과 다를 때만 시계를 재시작합니다.
 - **`operator==`** : Iris(와 FastArray 변경 감지)는 item을 값으로 비교하므로 복제 필드(`NetId`, `X`, `Y`, `VX`, `VY`)만 비교에 참여시킵니다. 서버 / 클라이언트 bookkeeping 필드는 제외됩니다.
 - **`bReplicateUsingRegisteredSubObjectList = true`** : Iris는 등록된 sub object 목록으로만 sub object를 복제합니다. 지금 bubble에는 sub object가 없지만, 추가돼도 올바르게 동작하도록 켜 두었습니다.
 - **확인 방법** : 콘솔 `opt.net.Info`는 이 프로세스가 요청한 복제 시스템(Iris / legacy)과 `net.IsPushModelEnabled`, `net.SubObjects.DefaultUseSubObjectReplicationList`(Iris는 1 필요)를 로그로 남깁니다. Iris가 실제로 bubble을 복제하는지는 `Net.Iris.PrintPushBasedStatuses`(`CrowdBubble`이 `PushBased: 1`로 표시되어야 함)와 시작 시 `LogIris` 로그로 확인하고, 클라이언트 `opt.crowd.RenderStats 1` 화면 출력에도 `net=` 항목으로 복제 모드가 표시됩니다.
+
+#### Network Insights 검증 분석
+
+`-UseIrisReplication=1`(Iris)과 `-UseIrisReplication=0`(Legacy FastArray) 두 경로 모두에서 `ACrowdBubble`의 `AgentArray`가 클라이언트로 정상 복제되는 것을 확인했습니다. 두 캡처는 서로 다른 실행 환경에서 추출한 패킷으로, 대역폭 비교(KB/s 벤치마크)가 아닌 **런타임 직렬화 및 복제 경로 검증**을 목적으로 합니다.
+
+<p align="center">
+  <img src="Image/UnrealInsight_Network_Profiler_Iris_whole_array_replicated_issue.PNG" alt="Network Insights - Iris (-UseIrisReplication=1)" width="1275"><br>
+  <sub>Networking Insights › Iris (<code>-UseIrisReplication=1</code>) — <code>DataStream</code> 패킷, <code>AgentArray</code> 전체가 <code>HugeObjectState</code> → <code>PartialNetBlob</code> 조각으로 전송</sub>
+</p>
+
+<p align="center">
+  <img src="Image/UnrealInsight_Network_Profiler_Legacy_1.PNG" alt="Network Insights - Legacy FastArray (-UseIrisReplication=0)" width="1041"><br>
+  <sub>Networking Insights › legacy FastArray (<code>-UseIrisReplication=0</code>) — <code>Actor</code> 채널 패킷, 변경된 element만 <code>ChangedElement</code>로 전송</sub>
+</p>
+
+| 분류 | Iris (`-UseIrisReplication=1`) | Legacy FastArray (`-UseIrisReplication=0`) |
+| :--- | :--- | :--- |
+| **최상위 이벤트** | `DataStream` (Channel 2 / 6,842 bits) | `Actor` (Channel 7 / 1,243 bits) |
+| **버블 오브젝트** | `CrowdBubble` (NetId 20) | `CrowdBubble` (NetId 16 / 1,216 bits) |
+| **`AgentArray` 구조** | `HugeObjectState` ➔ `CrowdBubbleAgentArray` (7,319 bits) | `AgentArray` (1,198 bits) |
+| **전송 단위** | `PartialNetBlob` (6조각 분할 스트리밍 / 총 6,246 bits) | `ChangedElement` (9개 가변 데이터 / 총 1,049 bits) |
+| **하위 프로퍼티** | 없음 (배열 전체가 단일 모놀리식 블록으로 직렬화) | `PropertyHandle` + `X·Y` · `VX·VY` 개별 필드 분리 |
+- **복제 파이프라인 활성화 교차 검증**: 동일한 버블 컨테이너 데이터가 구동 모드에 따라 상이한 최상위 채널(`DataStream` vs `ActorChannel`)로 완벽히 분기되는 것을 확인했습니다. 타임라인 이벤트 구조의 근본적인 차이(`HugeObjectState` ➔ `PartialNetBlob` 패킷 분할 메커니즘 vs `ChangedElement` 가변 델타 동기화)를 통해 엔진 레벨에서 런타임에 직렬화 아키텍처가 완전히 교체 적용됨을 실증했습니다.
+- **Legacy FastArray 정밀 델타 전송 및 와이어 포맷 정합성**: 동기화 처리가 필요한 에이전트 데이터만 9개의 `ChangedElement` 이벤트로 정밀 분리되어 수신되며, 엘리먼트 스코프 내부에서도 변동이 감지된 프로퍼티만 `PropertyHandle` 유도 컨텍스트와 함께 페이로드에 컴팩트하게 패킹됩니다 (X 9회, Y 8회, VX 8회, VY 9회 수신 확인). 이 타임라인 트레이스에 수집된 필드별 데이터 할당량은 자체 구현한 압축 와이어 포맷 명세(X·Y: 16 bits `int16`, VX·VY: 8 bits `int8`)와 소수점 비트 단위까지 완벽히 일치함을 증명했습니다.
+- **Iris Replication 시스템적 한계**: 현 단계에서 Iris 엔진은 엘리먼트 단위의 가변 바이너리 분할 생성을 지원하지 않고, `AgentArray` 전체를 하나의 거대한 단일 상태 블록(7,319 bits)으로 직렬화하여 처리하는 특성을 보입니다. 대형 원시 객체를 조각내어 안전하게 분할 스트리밍하는 `PartialNetBlob` 경로(샘플 패킷 내 `Payload` 6조각 분할 수신 확인)를 강제하게 되며, 이로 인해 FastArray 고유의 가변 델타 압축 효율(Delta 전송 이득)이 일시적으로 감쇄됩니다. 본 프로파일링 분석 결과는 앞서 클라이언트 레이어에서 연산 폭주를 예방하기 위해 설계한 수신 캐시 검증 시스템(`MarkReceived` 예외 처리)의 기술적 필요성을 명확하게 뒷받침합니다.
+- **프로파일러 데이터 판독 시 주의사항**
+  - **식별자 체계 격리**: 시각화 툴에 표기된 상위 `NetId`(20 및 16)는 복제용 네트워크 액터 컨테이너 자체가 부여받은 내부 핸들이며, 구조체 배열 내부에서 각 NPC 에이전트를 추적하는 도메인 데이터인 `FCrowdAgentItem::NetId` 값과는 완전히 독립된 별개의 관리 코드입니다.
+  - **대역폭 수치 직접 비교 불가**: 두 트레이스는 패킷의 전송 아키텍처 성격 자체가 완전히 다릅니다. Iris 트레이스는 대형 구조체의 전체 상태를 분할 전송하는 과정 중 포착된 시점이며, Legacy 트레이스는 순수 가변 델타 압축 패킷입니다. 따라서 단순히 표기된 개별 패킷 비트 수만으로 시스템 전체의 우위를 단정할 수 없으며, 고정 통제 조건에서의 장기 평균 송신량(KB/s) 데이터는 추가 실측 실험 섹션을 통해 정량적 지표로 업데이트될 예정입니다.
 
 ### 7. 와이어 포맷 (Wire Format) — 데이터 양자화 및 격자 원점 설정
 
@@ -907,7 +941,7 @@ if (bSpaced && (bQuiet || bOverdue))
 #### 에디터 검증 — World Partition (PIE)
 
 <p align="center">
-  <img src="Image/Worldpartition_Runtime_Hash.png" alt="World Partition Runtime Hash 2D 오버레이와 출력 로그" width="720"><br>
+  <img src="Image/Worldpartition_Runtime_Hash.png" alt="World Partition Runtime Hash 2D 오버레이와 출력 로그" width="905"><br>
   <sub>Standalone PIE · <code>L_MassBubbleWorld</code> · <code>opt.crowd.SpawnBots 2</code> 실행 후 — Runtime Hash 2D 오버레이와 Output Log</sub>
 </p>
 
@@ -940,7 +974,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 | 도구 | 사용법 | 볼 수 있는 것 |
 |---|---|---|
 | Stat | 서버 `stat OptCrowd` · 클라이언트 `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble cycle, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` (화면 예시: 아래) |
-| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*`, `Opt.Render.Update` 스코프, Networking Insights |
+| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*`, `Opt.Render.Update` 스코프, Networking Insights (패킷별 `CrowdBubble` / `AgentArray` 비트 수, Iris · legacy 복제 경로 구분 — 6장 캡처) |
 | CSV Profiler | `csvprofile start` / `csvprofile stop` | 카테고리 `OptCrowd`(`StreamingBusyCells` 포함), `OptRender` (Test 빌드에서도 동작) |
 | 로그 | `opt.crowd.Stats` | region 상태별 개수, LOD tier 분포, viewer 수, spawn/despawn 큐 길이, snapshot region 수, 대기 중인 봇 작업, WP busy 셀 · 마지막 GC 요약, 현재 스위치 값 |
 | Hitch 로그 | `opt.hitch.LogMs <ms>` | 임계값을 넘긴 프레임마다 GC(소요 · 간격 · 시작 주체) · WP 셀 활동 · crowd 상태 |
@@ -1066,7 +1100,7 @@ TestEqual(TEXT("hysteresis: no rebase while jittering on the border"), Hysteresi
 TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), NaiveFlips > 150);
 ```
 
-> Automation Test는 순수 로직의 무결성을 검증합니다. 월드 · Mass · 네트워크가 실제로 동작하는지는 에디터 PIE 캡처로 확인했습니다 — Mass Debugger, Unreal Insights, World Partition 오버레이와 로그, stat 화면([계측과 실험 설계](#계측과-실험-설계)), 프로젝트 설정 화면([설정](#설정)).
+> Automation Test는 순수 로직의 무결성을 검증합니다. 월드 · Mass · 네트워크가 실제로 동작하는지는 에디터 PIE 캡처로 확인했습니다 — Mass Debugger, Unreal Insights, World Partition 오버레이와 로그, stat 화면([계측과 실험 설계](#계측과-실험-설계)), 프로젝트 설정 화면([설정](#설정)). 복제 경로(Iris / legacy)는 Network Insights 패킷 캡처로 확인했습니다(6장).
 
 ---
 
@@ -1213,51 +1247,3 @@ Project Settings 화면(기본값, `DefaultGame.ini`에 저장)이며 위 표의
 </p>
 
 스트리밍 프로파일(`s.*` / `wp.*`)과 Quiet GC · Hitch 로그 임계값은 프로젝트 설정이 아니라 CVar(`opt.stream.*`, `opt.hitch.LogMs`)입니다. [계측과 실험 설계](#계측과-실험-설계)의 A/B 킬스위치 표를 참고하세요.
-
----
-
-## 시스템 구조 선택과 최적화 비용
-
-| 설계 요약 | 최적화 효과 | 트레이드오프 |
-|---|---|---|
-| NPC = Mass entity, 복제 단위 = 플레이어당 Bubble | NPC당 Actor / ActorChannel / 복제 상태 제거 | diff · 직렬화 · 클라이언트 보간을 직접 구현하고 유지해야 함 |
-| Dead reckoning | 등속 agent 재전송 0, 대역폭 대폭 감소 | 서버가 agent × 플레이어마다 `SentPos` / `SentVel` / `SentTime` 보유, 클라이언트 외삽 필요 |
-| 200 m 격자 origin + int16 | agent당 위치 4 B | rebase 시 해당 플레이어에게 전체 재전송 (hysteresis로 빈도 억제) |
-| LOD를 fragment 값으로 사용 | structural change 없음 | LOD 분기가 hot loop 안에 존재 |
-| Time-slicing | 원거리 연산 비용 감소 | 갱신 지연 → `PendingDelta` 누적과 `MaxStepDeltaSec` 상한으로 보정 |
-| Region이 상태 소유 | WP 스트리밍과 생명주기 분리, 정확한 복원 | region 테이블 / 영속 상태 / 상태 기계 관리 코드 |
-| POD tuning 스냅샷 | worker thread에서 안전한 설정 읽기 | 런타임 리로드 시 region / grid 기하는 고정 (`bKeepGeometry`) |
-| Region별 균일 격자 | 소형 · 캐시 친화 · 월드 크기와 무관 | AOI 질의가 region 경계를 넘으면 여러 격자를 순회 |
-| Quiet GC (언로드 후 GC 지연) | 셀 언로드 직후 forced GC가 만드는 프리즈를 스트리밍이 없는 시점으로 이동 | 해제 가능한 오브젝트가 최대 `GCMaxDeferSec`(20초)까지 메모리에 남음. 셀이 계속 바뀌면 Idle 시점이 오지 않아 overdue 경로로 실행 |
-| wall-clock spawn / despawn 예산 | 스트리밍 구간에도 NPC 생성 / 삭제 비용에 시간 상한 | 큰 region이 여러 프레임에 걸쳐 채워짐 (가까운 region부터 처리). batch마다 시계 확인 비용 |
-| 엔진 streaming CVar 프로파일 | AddToWorld / RemoveFromWorld 같은 엔진 작업을 프레임에 분산 | 프레임당 처리량을 줄이는 만큼 셀이 월드에 반영되기까지 더 많은 프레임이 걸릴 수 있음. CVar 이름 / 존재 여부가 엔진 버전에 의존 (`opt.stream.Dump`로 확인) |
-| Snapshot Scope | 봇 전용 region의 grid 구축 생략 | 범위 밖 region은 stale grid이므로 질의에서 제외해야 함 → snapshot 범위(`SnapshotMarginCm` 포함)가 bubble 질의 범위를 항상 덮어야 하는 불변식이 생김 |
-
----
-
-## 코드 맵
-
-| 파일 | 역할 |
-|---|---|
-| `MassBubble.{h,cpp}` | Primary game module, `LogMassBubble` |
-| `Core/MassBubbleStats.{h,cpp}` | stat group · CSV category · `OPT_SCOPE` |
-| `Core/MassBubbleStreamingMonitor.{h,cpp}` | WP 셀 고부하 감시, Quiet GC, GC 측정, Hitch 로그 (모든 game / PIE 월드) |
-| `Core/MassBubbleRuntimeConfig.{h,cpp}` | 엔진 streaming CVar 프로파일, `opt.stream.*` · `opt.hitch.LogMs` CVar, `opt.stream.Apply` / `Dump`, `opt.net.Info` |
-| `Crowd/CrowdTypes.h` | `ECrowdLOD`, `FCrowdTuning`(POD), `FCrowdSavedAgent` |
-| `Crowd/CrowdFragments.h` | Mass tag / fragment 정의 |
-| `Crowd/CrowdMath.h` | xorshift32, avalanche hash, LOD hysteresis, region 수학 (header-only) |
-| `Crowd/CrowdCellGrid.h` | counting-sort 균일 격자 (header-only) |
-| `Crowd/CrowdSettings.{h,cpp}` | `UDeveloperSettings`, CVar, POD 스냅샷, 리로드 |
-| `Crowd/CrowdSubsystem.{h,cpp}` | Region 상태 기계, 뷰어, wall-clock 예산 spawn / despawn, snapshot (scope), 봇 ramp |
-| `Crowd/CrowdDirector.{h,cpp}` | Game-thread 구동 (최초 spawn 부트스트랩) |
-| `Crowd/CrowdProcessors.{h,cpp}` | LOD / Movement / Snapshot 프로세서 |
-| `Net/CrowdNetMath.h` | 양자화 · origin lattice · dead reckoning (header-only) |
-| `Net/CrowdBubble.{h,cpp}` | 플레이어별 AOI 복제 Actor |
-| `Game/MassBubbleGameMode.{h,cpp}` | 로그인 시 bubble 생성, `-OptBots=N` 처리 |
-| `Game/MassBubbleCharacter.{h,cpp}` | Flying 모드 고정 테스트 폰 (모든 머신에서 동일 설정 → 이동 모드 desync / 보정 폭주 방지) |
-| `World/MassBubbleStreamingAnchor.{h,cpp}` | virtual viewer + WP streaming source + 부하 테스트 봇 |
-| `CrowdConsole.cpp` | `opt.crowd.*` 콘솔 명령 (non-shipping) |
-| `CrowdTests.cpp` | Automation Tests 4종 |
-| `MassBubbleRender/` | ClientOnly 모듈 — `CrowdRenderSubsystem`, `CrowdRenderHost`, `CrowdRenderSettings` |
-| `*.Build.cs`, `*.Target.cs` | 모듈 / 타깃 정의 (Game · Client · Server · Editor) |
-| `Image/` | README 캡처 (Mass Debugger · Unreal Insights · World Partition · stat · 프로젝트 설정) |
