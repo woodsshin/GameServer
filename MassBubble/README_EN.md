@@ -32,12 +32,13 @@ Server-authoritative **Mass Entity** simulation · per-player **AOI (Area of Int
 
 This is a reference implementation of a pipeline that **simulates thousands to tens of thousands of NPCs on a dedicated server** and replicates **only the surrounding area of each player (AOI)** to connected clients.
 
-The design ensures that the following three cost axes each have an **observable upper bound**, regardless of how large the NPC population grows. Every optimization can be toggled individually via CVar kill switches, ensuring each is validated by measurement rather than assumption.
+The design ensures that the following four cost axes each have an **observable upper bound**, regardless of how large the NPC population grows. Every optimization can be toggled individually via CVar kill switches, ensuring each is validated by measurement rather than assumption.
 
 | Cost Axis | Naive Implementation (Actor-per-NPC) | MassBubble |
 |---|---|---|
 | Server CPU · Simulation | Actor/Component Tick per NPC; all agents updated every frame | Processing over contiguous per-chunk arrays in Mass, distance-based LOD + time-slicing, parallel chunk processing |
 | Server CPU · Bandwidth · Replication | One ActorChannel per NPC, property comparison, full-state transmission | **One Actor per player**, Push Model, FastArray delta serialization, dead reckoning, 10-byte quantized records |
+| Server · World Partition Streaming | A GC the engine forces right after every cell load / unload; bulk NPC spawns / despawns pile onto the same frame | Engine streaming time-limit profile, **Quiet GC**, reduced spawn / despawn budget while WP is under load, hitch log |
 | Client · Rendering | Actor + Component + draw call overhead per NPC | **A single ISM Component**, one batch update per frame |
 
 **Non-goals** — AI (behavior trees, pathfinding, collision avoidance), animation, external persistence, and anti-cheat are out of scope. NPC logic is intentionally simplified; it serves strictly as a workload for validating the data pipeline under heavy optimization (simulation → snapshot → replication → rendering).
@@ -51,14 +52,17 @@ The design ensures that the following three cost axes each have an **observable 
 | Simulation | Fragments split by access pattern, single archetype, **LOD stored as a fragment value** | Contiguous array access eliminates cache misses; avoids structural changes (archetype moves) and memory overhead typically triggered by LOD changes | `CrowdFragments.h` |
 | Simulation | Distance-based **LOD + time-slicing** (1 / 2 / 6 / 0 frames) + hysteresis | Under default settings with a single viewer, **only ≈ 830 out of 10,000** agents execute movement logic per frame (analytical estimate) | `CrowdProcessors.cpp`, `CrowdMath.h` |
 | Simulation | `ParallelForEachEntityChunk`, chunk-local writes | Workload is distributed across worker threads, ensuring lock-free execution | `CrowdProcessors.cpp` |
-| Streaming | **Region-owned state** + frame-budgeted spawning/despawning + deterministic restoration | Independent of WP cell load/unload states; eliminates frame drops caused by spawning spikes | `CrowdSubsystem.cpp` |
+| Streaming | **Region-owned state** + wall-clock-bounded processing + spawn / despawn scaled down under load + **deterministic restoration** | Independent of WP cell load/unload states; eliminates frame drops caused by spawning spikes | `CrowdSubsystem.cpp` |
+| Streaming | **Prevents hitches at the moment WP loads / unloads** + engine streaming CVar profile + busy-cell monitoring + **Quiet GC** | While cells are loading or being removed, GC and NPC structural changes are deferred and engine work is spread across frames; the cause of a hitch (GC / WP / crowd) is told apart in the log | `MassBubbleStreamingMonitor.cpp`, `MassBubbleRuntimeConfig.cpp` |
 | Spatial Query | Per-region uniform grid, rebuilt via **counting sort** | Rebuild complexity is O(N + cells) with zero allocations after warm-up, completely independent of world size | `CrowdCellGrid.h` |
+| Spatial Query | Snapshot only the regions that touch a real player's bubble | Regions seen only by bots skip the grid build (copy + counting sort) | `CrowdSubsystem.cpp` |
 | Replication | **One Actor per player** (`bOnlyRelevantToOwner` + `COND_OwnerOnly`) + **Push Model** | Eliminates per-NPC ActorChannels; guarantees zero comparison overhead when state is clean | `CrowdBubble.cpp` |
 | Replication | int16 / int8 **quantization** + 200m lattice **origin rebasing** | Shrinks footprint to **10 bytes** per agent (−81% reduction vs. ≈ 52-byte naive layout) | `CrowdNetMath.h` |
 | Replication | **Dead reckoning** (distance-dependent tolerance) | Zero redundant updates for agents moving in a straight line at constant velocity; automated tests assert message volume drops **under 15%** of the naive baseline | `CrowdNetMath.h`, `CrowdTests.cpp` |
+| Replication | **Iris / legacy dual-compatible** FastArray | The same build can compare performance and compatibility by switching the replication system with a launch option. Network Insights confirmed that `AgentArray` is replicated to the client on both paths; the Iris path sends the whole `AgentArray`, unlike legacy, which sends only the changed elements (§6) | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
 | Client | Extrapolation + exponential smoothing + **single-pass ISM batch updates** | Consolidates 400 agents into 1 Actor, 1 Component, and 1 render-state update | `CrowdRenderSubsystem.cpp` |
 | Build | **`ClientOnly` module separation** | Dedicated server target completely strips out the rendering module | `MassBubble*.Target.cs` |
-| Verification | CVar kill switches, integrated stat / CSV / Insights instrumentation, 4 Automation Tests | Optimizations are empirically measured and architectural invariants are programmatically proven | `CrowdSettings.cpp`, `MassBubbleStats.h`, `CrowdTests.cpp` |
+| Verification | CVar kill switches, integrated stat / CSV / Insights instrumentation, **hitch log**, 4 Automation Tests | Optimizations are measured and their performance verified; hitches are told apart by cause | `CrowdSettings.cpp`, `MassBubbleStats.h`, `MassBubbleStreamingMonitor.cpp`, `CrowdTests.cpp` |
 
 ---
 
@@ -70,6 +74,8 @@ The design ensures that the following three cost axes each have an **observable 
 flowchart TB
     subgraph SERVER["Dedicated Server (authority)"]
         DIR["UCrowdDirector<br/>game-thread driver"] --> SUB["UCrowdSubsystem<br/>regions / viewers / persisted state"]
+        WPS["World Partition<br/>level streaming / GC"] -. "state change / GC delegates" .-> MON["UMassBubbleStreamingMonitor<br/>busy cells / quiet GC / hitch log"]
+        MON -- "IsBusy() → shrink spawn / despawn budget" --> SUB
         SUB -- "budgeted batch create / destroy" --> LOD
         subgraph MASS["Mass - PrePhysics phase"]
             LOD["LOD Processor<br/>1/4 of agents per frame"] --> MOVE["Movement Processor<br/>time-sliced and parallel"]
@@ -90,11 +96,15 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     autonumber
+    box rgba(66,133,244,0.15) Dedicated Server · authority
     participant D as UCrowdDirector
     participant M as Mass (PrePhysics)
     participant B as ACrowdBubble (PostPhysics)
     participant N as NetDriver
+    end
+    box rgba(52,168,83,0.15) Client · ClientOnly module
     participant C as Client RenderSubsystem
+    end
 
     D->>D: RefreshViewers, EvaluateRegions (4 Hz), PumpRegionJobs
     D->>D: mark snapshot due (ReplicationHz)
@@ -111,6 +121,7 @@ sequenceDiagram
 | Component | Execution Context | Rationale |
 |---|---|---|
 | `UCrowdDirector`, `UCrowdSubsystem` | Game Thread | Structural changes (entity creation/destruction) are prohibited while Mass processing is active; deferred until `IsProcessing()` returns false |
+| `UMassBubbleStreamingMonitor` | Game Thread (tickable world subsystem) | Level-streaming state changes and GC delegates are invoked on the game thread. `UCrowdSubsystem` reads `IsBusy()` on the same thread, so no lock is needed |
 | `UCrowdLODProcessor` | Game Thread (`bRequiresGameThreadExecution`) | Accesses game-thread-restricted subsystems (e.g., the viewer list) |
 | `UCrowdMovementProcessor` | Worker Threads (`ParallelForEachEntityChunk`) | Restricts writes to chunk-local memory; reads settings from an immutable, POD tuning snapshot |
 | `UCrowdSnapshotProcessor` | Game Thread | Writes data to region-specific grids owned by the game-thread subsystem |
@@ -121,6 +132,7 @@ sequenceDiagram
 
 - **Single Source of Truth** — Mass entities exist strictly on the server or in standalone environments (`ExecutionFlags`, `ShouldCreateSubsystem`). Clients maintain only a quantized, local view of their immediate AOI.
 - **State Decoupled from Actors** — NPC state is managed by the Region (a server-side subsystem), not individual Actors. Its lifecycle is entirely independent of World Partition cell streaming states.
+- **Heavy Work Deferred to Streaming-Idle Moments** — While World Partition cells are loading or being removed, the NPC spawn / despawn budget is reduced, and the GC that follows a cell unload runs only once no busy cell is left. A one-frame delay on the server is a delay for every player.
 - **Isolatable Optimizations (Kill Switches)** — Every optimization feature supports real-time deactivation to allow empirical A/B performance profiling.
 - **Header-Only Pure Logic** — Core math and structures (`CrowdMath.h`, `CrowdCellGrid.h`, `CrowdNetMath.h`) are architected without dependencies on a world context, Mass, or replication layers, making them fully unit-testable.
 - **Compile/Design-Time Invariant Enforcement** — Structural thresholds and configurations are strictly clamped to mathematically prevent invalid states (e.g., ensuring the maximum bubble radius never overflows safe int16 boundaries).
@@ -146,6 +158,52 @@ struct FCrowdLODFragment      : FMassFragment { ECrowdLOD Tier; float PendingDel
 - **Large World Coordinates (LWC)** — Internal coordinates utilize `FVector2D` (double) precision for safe large-world simulation, delaying quantization until the replication boundary.
 - **Query Pruning Safe Guards** — Since agents are spawned dynamically at runtime, matching archetypes do not exist at startup. To prevent Mass from permanently pruning empty queries, all three processors return `false` from `ShouldAllowQueryBasedPruning()`, allowing `UCrowdDirector` to safely bootstrap initialization.
 
+#### MassEntity Memory and Performance Metrics — Mass Debugger (PIE)
+
+| Evaluation Item | Measured Value / Spec | Optimization Result and Technical Significance |
+| :--- | :--- | :--- |
+| **Single archetype** | `0xFFC5A8E9` (consolidated into one) | LOD tiers are designed as Fragment values rather than Tags, which **fundamentally eliminates the dynamic archetype-relocation operations (Structural Changes)** that a state change would otherwise cause. |
+| **Per-entity memory** | **64 B** (Fragment 56 B + Handle 8 B) | Agent data is packed into a 64-byte linear layout, giving a memory arrangement that is friendly to CPU cache lines. |
+| **Chunk occupancy** | **99.2%** (avg 2,030.8 / max 2,047 entities) | Entities are packed densely, without gaps, into 13 chunks of 128 KiB each. |
+| **Fragmentation waste** | **only 0.637%** (about 14 KiB) | Unlike a typical object-oriented layout, the linear data layout **holds memory waste down to nearly 0%**. |
+| **Spatial complexity** | Build: `O(N + cells)` / query: `O(visited cells + agents)` | Complexity is minimal, and internal arrays are reused through `Reset()` and `EAllowShrinking::No`, achieving **zero additional runtime memory allocations after warm-up**. |
+| **Network data savings** | **10 B per agent** | Data quantization and origin rebasing **cut network send / receive volume by about 81%** compared with the previous layout. |
+
+The captures below show the Mass Debugger in editor PIE, confirming that Mass behaves as configured above. They check the configuration and are not a performance benchmark.
+
+<p align="center">
+  <img src="Image/MassDebugger_Archetypes.PNG" alt="Mass Debugger - Archetypes" width="640"><br>
+  <sub>Mass Debugger › Archetypes — <code>0xFFC5A8E9</code></sub>
+</p>
+
+<p align="center">
+  <img src="Image/MassDebugger_Fragments.PNG" alt="Mass Debugger - Fragments" width="560"><br>
+  <sub>Mass Debugger › Fragments</sub>
+</p>
+
+- **All four fragments are attached to the same entity set**: the `Crowd Id` · `Location` · `Motion` · `LOD` fragments are all listed with 1 archetype / 26,400 entities (the same row repeats in the list, but the values are identical).
+
+<p align="center">
+  <img src="Image/MassDebugger_Entities.PNG" alt="Mass Debugger - Entities" width="560"><br>
+  <sub>Mass Debugger › Entities</sub>
+</p>
+
+- **Entity handles**: the handles in the Entities tab (`i`: index, `sn`: serial number) confirm that agents are actually created as entities.
+
+<p align="center">
+  <img src="Image/MassDebugger_Processors.PNG" alt="Mass Debugger - Processors" width="640"><br>
+  <sub>Mass Debugger › Processors</sub>
+</p>
+
+- **Processor registration**: `CrowdLODProcessor_0` · `CrowdMovementProcessor_0` · `CrowdSnapshotProcessor_0` are registered under *Phase-executed processors* (not as observers). The SmartObject · DebugVis · EnvQuery families in the same list are default engine / plugin processors.
+
+<p align="center">
+  <img src="Image/MassDebugger_Processing_Graph.PNG" alt="Mass Debugger - Process Graphs (Pre Physics Group)" width="640"><br>
+  <sub>Mass Debugger › Process Graphs › Pre Physics Group</sub>
+</p>
+
+- **Execution order**: in the `Pre Physics Group`, `CrowdLODProcessor` → `CrowdMovementProcessor` → `CrowdSnapshotProcessor` are linked as a dependency chain, so the order declared with `ExecuteAfter` (LOD → Move → Snapshot) can be seen exactly as it was compiled. The default engine processors are shown under a separate root.
+
 ### 2. Region-Based Population Streaming
 
 NPC state lifecycle is detached from Actor lifecycles, residing instead within **Regions** managed by a server-side subsystem (defaulting to 128m to align with standard World Partition runtime cell dimensions). Agents are neither destroyed nor reset when World Partition cells stream out.
@@ -163,27 +221,49 @@ enum class ECrowdRegionState : uint8
 
 ```cpp
 // Crowd/CrowdSubsystem.cpp — TickDirector / PumpRegionJobs
-// Structural changes (creation / destruction) are only legal while Mass is idle.
+// Structural changes (creation / destruction) are only allowed while Mass is not processing.
 if (!EntityManager->IsProcessing())
 {
 	PumpRegionJobs();
 }
 
-int32 SpawnBudget = T.MaxSpawnPerFrame;
-while (SpawnBudget > 0 && SpawnQueue.Num() > 0)
+// PumpRegionJobs: bounded by wall-clock time, not by count (abridged)
+const bool bBudgeted = CrowdCVars::BudgetedPump != 0;                          // 0 = previous fixed-count behavior (A/B)
+const bool bStreamingBusy = Monitor.IsValid() && Monitor->IsBusy();            // is WP loading / adding / removing cells?
+const double BudgetMs = bStreamingBusy ? T.SpawnBudgetBusyMs : T.SpawnBudgetMs; // 0.25 ms : 1.0 ms
+const double Deadline = FPlatformTime::Seconds() + 0.001 * BudgetMs;
+const int32 Batch = bBudgeted ? T.StructuralBatchSize : T.MaxSpawnPerFrame;    // 64
+
+int32 Budget = T.MaxSpawnPerFrame;                                             // hard cap per frame
+bool bDidWork = false;
+while (Budget > 0 && SpawnQueue.Num() > 0)
 {
-	FCrowdRegion& Region = Regions[SpawnQueue];
-	// BatchCreateEntities handles bulk allocations efficiently
-	SpawnBudget -= SpawnSlice(Region, SpawnBudget);
-	if (Region.State == ECrowdRegionState::Active) { SpawnQueue.RemoveAt(0); }
-	else { break; }  // Frame budget exhausted; defer remainder to next tick
+	// At least one batch always runs per frame; once the budget is exceeded, the rest is deferred to the next frame.
+	if (bBudgeted && bDidWork && FPlatformTime::Seconds() >= Deadline)
+	{
+		break;
+	}
+
+	FCrowdRegion& Region = Regions[SpawnQueue[0]];
+	// BatchCreateEntities (bulk entity creation)
+	const int32 Used = SpawnSlice(Region, FMath::Min(Budget, Batch));
+	Budget -= FMath::Max(Used, 1);
+	bDidWork = true;
+	if (Region.State == ECrowdRegionState::Active)
+	{
+		SpawnQueue.RemoveAt(0);
+	}
+	// A region that still has agents left is continued by the next iteration (or the next frame).
 }
+// Despawn follows the same rule (DespawnBudgetMs / DespawnBudgetBusyMs, BatchDestroyEntities)
 ```
 
 - **Streaming Bounds Evaluation** — Active regions are dynamically evaluated at **4 Hz** based on a Chebyshev distance (`ActiveRegionRadius`, default = 2, yielding a 5×5 grid) surrounding all active viewers (players and virtual stress bots).
 - **Proximity-Based Prioritization** — Newly prioritized regions are sorted and activated based on ascending distance to the closest viewer, ensuring immediate player surroundings populate first.
 - **Activation Hysteresis Buffer** — Out-of-bounds regions are preserved for a grace period defined by `RegionDeactivateDelaySec` (10s) before despawning, eliminating thrashing when players cross borders repeatedly.
-- **Time-Sliced Frame Budgeting** — Caps instantiation (500) and destruction (1,000) rates per frame via `BatchCreateEntities` / `BatchDestroyEntities` to enforce absolute frame-rate stability.
+- **Wall-Clock Time-Slicing** — Limits by **time**, not by count. `BatchCreateEntities` / `BatchDestroyEntities` are called `StructuralBatchSize` (64) agents at a time and the clock is checked after every batch; once `SpawnBudgetMs` / `DespawnBudgetMs` (1.0 ms each) is exceeded, the rest is deferred to the next frame. At least one batch always runs per frame, so the queue never stalls, and `MaxSpawnPerFrame` (500) / `MaxDespawnPerFrame` (1,000) remain as hard caps.
+- **Streaming-Linked Budget** — While `UMassBubbleStreamingMonitor` detects World Partition cells loading / being added to the world / being removed (`IsBusy()`), the budget shrinks to `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs` (0.25 ms each). The point is not to pile NPC structural changes onto a stretch of frames the engine is already spending.
+- **A/B** — `opt.crowd.BudgetedPump 0` returns to the previous behavior (a fixed 500 / 1,000 agents per frame, no clock checks), which reproduces the streaming hitch.
 - **Deterministic State Restoration** — Upon deactivation, entity metrics (`FCrowdSavedAgent` tracking NetId, transform, velocity, timers, and internal pseudo-random state) are packed into memory, ensuring identical reconstruction via `Seed = Hash32(regionCoordHash ^ WorldSeed)` and per-agent xorshift32 generation.
 
 ### 3. Distance-Based LOD and Time-Slicing
@@ -200,12 +280,15 @@ while (SpawnBudget > 0 && SpawnQueue.Num() > 0)
 inline ECrowdLOD ComputeTier(float Dist, ECrowdLOD Current, const FCrowdTuning& T)
 {
 	const ECrowdLOD Wanted =
-		Dist < T.LODDistanceCm ? ECrowdLOD::High :
-		Dist < T.LODDistanceCm ? ECrowdLOD::Medium :
-		Dist < T.LODDistanceCm ? ECrowdLOD::Low : ECrowdLOD::Off;
+		Dist < T.LODDistanceCm[0] ? ECrowdLOD::High :
+		Dist < T.LODDistanceCm[1] ? ECrowdLOD::Medium :
+		Dist < T.LODDistanceCm[2] ? ECrowdLOD::Low : ECrowdLOD::Off;
 
-	if (Wanted == Current) { return Current; }
-  
+	if (Wanted == Current)
+	{
+		return Current;
+	}
+
 	// Down-sampling LOD: only drop quality if distance exceeds boundary + hysteresis
 	if (static_cast<uint8>(Wanted) > static_cast<uint8>(Current))
 	{
@@ -263,6 +346,17 @@ else                               { EntityQuery.ForEachEntityChunk(Context, Pro
 - **Thread-Safety Proof** — Concurrency is guaranteed safe because: (1) memory mutations are strictly isolated to localized, chunk-specific arrays; (2) simulation configurations read exclusively from an unmanaged, immutable POD snapshot (`FCrowdTuning`); (3) random generation relies on per-agent unique states inside their respective fragments, removing centralized RNG locks; and (4) telemetry metrics are collected locally per chunk and pushed via thread-safe atomic relaxed additions.
 - Main-thread-bound dependencies (LOD evaluation, Snapshot generation) declare a `GameThreadOnly = true` trait via `TMassExternalSubsystemTraits` to enforce execution isolation.
 
+#### Editor Verification — Unreal Insights (PIE)
+
+<p align="center">
+  <img src="Image/UnrealInsight_MassProcessor.PNG" alt="Unreal Insights - Mass processors" width="1000"><br>
+  <sub>Unreal Insights › Timing Insights — timer filter <code>crowd</code> (Editor · Development, one frame zoomed in)</sub>
+</p>
+
+- **Thread placement**: `CrowdLODProcessor_0` (≈ 141 µs) and `CrowdSnapshotProcessor_0` (≈ 485 µs, on a frame where a snapshot ran) run inside the Game Thread's `MassProcessingQueue Main-Thread Runner Task`, while `CrowdMovementProcessor` (`Opt.Crowd.Move` ≈ 75 µs) runs in the `Mass Processor Worker Task` on `Foreground Worker #0`. This matches the placement in the [Threading Model](#threading-model) table (LOD · Snapshot = game thread, Movement = worker).
+- **`OPT_SCOPE` events**: `Opt.Crowd.LOD` / `Opt.Crowd.Move` / `Opt.Crowd.Snapshot` appear nested inside the processor scopes, and the timer panel lists `Opt.Crowd.Director`, `Opt.Crowd.Bubble`, and `Opt.Crowd.SpawnSlice` / `DespawnSlice` under the same naming scheme ([Instrumentation and Experiment Design](#instrumentation-and-experiment-design)).
+- **Share of the frame**: in this frame the whole Mass `PrePhysics` phase takes ≈ 0.79 ms out of a 14.03 ms frame. This is a single-frame sample, not a benchmark; comparative measurements are done with the A/B switches.
+
 ### 5. Snapshot and Spatial Grid
 
 To shield the networking tier from expensive, high-frequency locks against the central Mass `EntityManager`, the `UCrowdSnapshotProcessor` isolates active entity states into flat, region-aligned structures at a throttled interval (`ReplicationHz`, default = 10 Hz). On non-sync frames, the execution query returns instantly.
@@ -276,7 +370,7 @@ if (Crowd == nullptr || !Crowd->IsSnapshotDue())
 }
 ```
 
-Every isolated region maintains an internal, 8×8 uniform grid (16m per cell grid mapping) completely rebuilt from scratch during the snapshot tick via a highly optimized **counting sort**.
+Every isolated region (128 m) maintains an internal, 8×8 uniform grid (16 m per cell) completely rebuilt from scratch during the snapshot tick via a highly optimized **counting sort**.
 
 ```cpp
 // Crowd/CrowdCellGrid.h — EndBuild
@@ -300,10 +394,26 @@ for (int32 i = 0; i < Num; ++i)                      // Phase 3: Sort agent indi
 - **Algorithmic Complexity** — Build overhead is bounded at O(N + cells); spatial lookup runs at O(visited cells + matched agents). Array storage is preserved via `Reset()` with `EAllowShrinking::No` to ensure absolute zero heap allocations post-initialization.
 - **Local vs. Global Grid Architectural Trade-off** — Localized 8×8 region grids remain inside CPU L1/L2 caches and scale uniformly regardless of whether entities are separated by dozens of kilometers. A single global grid would alternatively suffer from enormous sparse matrix structures or severe floating-point degradation at extreme coordinates.
 - **Spatial Resolution Queries** — Bounding box expansion evaluates cell boundaries using fast, squared-distance validation, avoiding heavy square-root operations. Out-of-bounds agents are safely clamped into safe perimeter buckets, preventing entity loss during region handoffs.
+- **Snapshot Scope** — Only the **regions that touch a real player's bubble** are snapshotted, not every live region (radius `BubbleRadiusCm` + `SnapshotMarginCm` (20 m)). A region seen only by server-side bots (virtual viewers) is never replicated anyway, so its grid build (copy + counting sort) is skipped. The grid of an out-of-scope region holds stale data, so `ForEachAgentInCircle` also skips that region and never emits stale agents. `opt.crowd.SnapshotScope 0` returns to the previous behavior (every live region).
+
+```cpp
+// Crowd/CrowdSubsystem.cpp — BeginSnapshot (abridged)
+const double Reach = T.BubbleRadiusCm + T.SnapshotMarginCm;      // 15,000 + 2,000 cm
+for (const FCrowdViewer& Viewer : Viewers)
+{
+	if (Viewer.bVirtual)
+	{
+		continue;   // bots / anchors are not replication targets
+	}
+	// Among the regions covered by the Viewer ± Reach rectangle, only Active / Spawning ones get RegionSnapshotMask[Slot] = 1
+}
+// Only regions whose mask is set get BeginBuild / EndBuild.
+// ForEachAgentInCircle skips regions outside the mask (= stale grids).
+```
 
 ### 6. Per-Player AOI Replication — `ACrowdBubble`
 
-Rather than spawning individual replicated Actors per active agent—which destroys server network performance—**a single dedicated Actor is spawned per player**, streaming their local AOI down via an optimized `FFastArraySerializer`.
+Rather than turning a 400-agent neighborhood into 400 individual replicated Actors—which destroys server network performance—**a single dedicated Actor is spawned per player**, streaming their entire local AOI down via an optimized `FFastArraySerializer`. (It follows the same idea as the Client Bubble approach used by Epic's MassReplication plugin, written as a minimal implementation.)
 
 ```cpp
 // Net/CrowdBubble.cpp — constructor and replicated properties
@@ -380,7 +490,65 @@ if (bStructural || NumDirty > 0) { MARK_PROPERTY_DIRTY_FROM_NAME(ACrowdBubble, A
 // Push Model: Bypasses standard replication loop comparative tracking entirely if property is unmodified
 ```
 
-> Toggling `opt.crowd.DeadReckoning 0` drops execution down into a standard naive replication tracking loop, re-transmitting structural modifications for all active elements every frame for clean performance diagnostics.
+> With `opt.crowd.DeadReckoning 0`, the previous logic runs instead of `ShouldResend`: every agent that is moving or has just stopped is re-sent on every tick (for A/B measurement).
+
+#### Iris / Legacy Dual-Replication Design
+
+`FCrowdAgentArray` is a standard `FFastArraySerializer`, so it **works on both** the legacy NetDriver (`NetDeltaSerialize`) and Iris (which supports existing FastArray definitions), and the same build can be compared by switching `-UseIrisReplication=0 / 1`. Because the two systems behave differently, the following handling is in place.
+
+```cpp
+// Net/CrowdBubble.cpp — ServerRebuild: after the swap-remove (abridged)
+Items.RemoveAtSwap(i);
+if (i < Items.Num())
+{
+	FCrowdAgentItem& Moved = Items[i];                  // the last element moved into slot i
+	IdToIndex[Moved.NetId] = i;
+	FillItem(Moved, Candidates[Moved.CandidateIndex].Agent, OriginWorld, Now);   // refresh with the agent's current state
+	AgentArray.MarkItemDirty(Moved);                    // the contents of slot i changed, so it must be sent
+}
+
+// Net/CrowdBubble.h — FCrowdAgentItem::MarkReceived: restart the extrapolation clock only when the replicated value actually changed
+if (bFirstTime || NetId != AppliedNetId || X != AppliedX || Y != AppliedY || VX != AppliedVX || VY != AppliedVY)
+{
+	RecvTime = Now;
+	// Applied* = the current replicated values
+}
+```
+
+- **Resend after swap-remove (Iris compatibility)**: Legacy FastArray serialization tracks each item by its own unique ID (`ReplicationID`), so even when `RemoveAtSwap` changes the array order, no additional network cost is incurred. UE 5's new Iris replication system, on the other hand, identifies elements by their array 'index'. The last item, which moved into the vacated slot `i`, is therefore recognized by Iris as a change in the contents of slot `i` and is sent to the client again. The important point here is that the data of the agent moved into slot `i` must first be refreshed to its current latest state. Otherwise the client restarts extrapolation from an outdated reference position from the past, causing a visual side effect in which the character abruptly snaps hard backward (rubber-banding).
+- **`MarkReceived`**: Iris can also report items whose values are unchanged. If `RecvTime` were refreshed every time, the agent would return to its last reference position and walk the same distance again, so the clock is restarted only when the value differs from the one applied just before (`Applied*`).
+- **`operator==`**: Iris (and FastArray change detection) compares items by value, so only the replicated fields (`NetId`, `X`, `Y`, `VX`, `VY`) take part in the comparison. Server / client bookkeeping fields are excluded.
+- **`bReplicateUsingRegisteredSubObjectList = true`**: Iris replicates sub-objects only through the registered sub-object list. The bubble has no sub-objects right now, but this is turned on so that it keeps working correctly if any are added.
+- **How to verify**: The console command `opt.net.Info` logs which replication system this process requested (Iris / legacy), along with `net.IsPushModelEnabled` and `net.SubObjects.DefaultUseSubObjectReplicationList` (Iris requires it to be 1). Whether Iris is really replicating the bubble is confirmed with `Net.Iris.PrintPushBasedStatuses` (`CrowdBubble` should show `PushBased: 1`) and the `LogIris` log at startup. On the client, the `opt.crowd.RenderStats 1` on-screen output also shows the replication mode in its `net=` entry.
+
+#### Network Insights Analysis
+
+On both the `-UseIrisReplication=1` (Iris) and `-UseIrisReplication=0` (Legacy FastArray) paths, we confirmed that `ACrowdBubble`'s `AgentArray` is replicated to the client correctly. The two captures are packets taken from different runs, and their purpose is to verify the **runtime serialization and replication path**, not to compare bandwidth (a KB/s benchmark).
+
+<p align="center">
+  <img src="Image/UnrealInsight_Network_Profiler_Iris_whole_array_replicated_issue.PNG" alt="Network Insights - Iris (-UseIrisReplication=1)" width="1275"><br>
+  <sub>Networking Insights › Iris (<code>-UseIrisReplication=1</code>) — <code>DataStream</code> packet; the whole <code>AgentArray</code> is sent as <code>HugeObjectState</code> → <code>PartialNetBlob</code> pieces</sub>
+</p>
+
+<p align="center">
+  <img src="Image/UnrealInsight_Network_Profiler_Legacy_1.PNG" alt="Network Insights - Legacy FastArray (-UseIrisReplication=0)" width="1041"><br>
+  <sub>Networking Insights › legacy FastArray (<code>-UseIrisReplication=0</code>) — <code>Actor</code> channel packet; only the changed elements are sent as <code>ChangedElement</code></sub>
+</p>
+
+| Category | Iris (`-UseIrisReplication=1`) | Legacy FastArray (`-UseIrisReplication=0`) |
+| :--- | :--- | :--- |
+| **Top-level event** | `DataStream` (Channel 2 / 6,842 bits) | `Actor` (Channel 7 / 1,243 bits) |
+| **Bubble object** | `CrowdBubble` (NetId 20) | `CrowdBubble` (NetId 16 / 1,216 bits) |
+| **`AgentArray` structure** | `HugeObjectState` ➔ `CrowdBubbleAgentArray` (7,319 bits) | `AgentArray` (1,198 bits) |
+| **Transfer unit** | `PartialNetBlob` (split into 6 pieces and streamed / 6,246 bits in total) | `ChangedElement` (9 variable-size entries / 1,049 bits in total) |
+| **Sub-properties** | None (the whole array is serialized as a single monolithic block) | `PropertyHandle` + individual fields `X·Y` · `VX·VY` separated |
+
+- **Cross-check that the replication pipeline is active**: We confirmed that the same bubble container data branches cleanly into different top-level channels (`DataStream` vs `ActorChannel`) depending on the run mode. The fundamental difference in the timeline event structure (the `HugeObjectState` ➔ `PartialNetBlob` packet-splitting mechanism vs. `ChangedElement` variable delta synchronization) demonstrates that the serialization architecture is fully swapped at the engine level at runtime.
+- **Precise delta transfer in Legacy FastArray and conformance to the wire format**: Only the agent data that needs synchronizing is received, cleanly separated into 9 `ChangedElement` events, and even inside an element scope only the properties detected as changed are packed compactly into the payload together with a `PropertyHandle`-derived context (X 9 times, Y 8 times, VX 8 times, VY 9 times observed). The per-field data allocation collected in this timeline trace matches the self-implemented compressed wire format specification (X·Y: 16-bit `int16`, VX·VY: 8-bit `int8`) down to the individual bit.
+- **Systemic limitation of Iris replication**: At this stage the Iris engine does not support generating variable-size binary pieces per element, and instead serializes the entire `AgentArray` as one huge single state block (7,319 bits). This forces the `PartialNetBlob` path, which splits a large raw object into pieces and streams them safely (6 `Payload` pieces were received in the sample packet), and as a result FastArray's inherent variable-delta compression efficiency (the gain from delta transfer) is temporarily diminished. This profiling result clearly supports the technical necessity of the receive-cache verification mechanism (the `MarkReceived` exception handling) that was designed earlier to prevent computation blow-ups on the client layer.
+- **Notes on reading the profiler data**
+  - **Separate identifier namespaces**: The top-level `NetId` values (20 and 16) shown in the visualization tool are internal handles assigned to the replicated network actor container itself, and are a completely independent management code from `FCrowdAgentItem::NetId`, the domain data that tracks each NPC agent inside the struct array.
+  - **Bandwidth figures cannot be compared directly**: The two traces differ completely in the nature of their packet transmission architecture. The Iris trace was captured at a moment while the full state of a large struct was being sent in pieces, whereas the Legacy trace is a pure variable-delta compressed packet. The per-packet bit counts shown therefore cannot be used to declare an advantage for either system as a whole; long-run average send volume (KB/s) under fixed, controlled conditions is planned to be added as quantitative figures in a later measurement section.
 
 ### 7. Wire Format — Data Quantization and Lattice Origin
 
@@ -491,6 +659,7 @@ FVector2D FCrowdAgentItem::GetExtrapolatedPosition(const FVector2D& OriginWorld,
 ```
 
 - **Server Memory Footprint** — Retains unique `SentPos`/`SentVel`/`SentTime` verification metrics per agent, mapped across active players (bypassing generic replication overhead).
+- **Quantization Round-Trip** — The comparison includes the quantization error, using the same values the client sees.
 - **Dual-Tier Proximity Error Tolerances** — Implements `NearErrorCm` (30cm tolerance) inside a 30m bubble perimeter and `FarErrorCm` (150cm tolerance) beyond, prioritizing crisp accuracy near the player and aggressive bandwidth reduction at a distance.
 - **Proactive Velocity Truncation (25cm/s)** — Triggers proactive updates immediately upon direction changes, neutralizing noticeable client-side positional snapping before errors pile up.
 - **Extrapolation Cap Guard** — Clamps simulation projections at `MaxExtrapolationSec` (1.5s) to guarantee characters stop moving if network connections freeze.
@@ -517,12 +686,13 @@ for (int32 Index = 0; Index < Count; ++Index)
 Instances->BatchUpdateInstancesTransforms(0, Transforms, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/true, /*bTeleport=*/true);
 ```
 
-- **`ACrowdRenderHost` Allocation** — Spawned as a streamlined, non-replicated actor with ticking completely disabled. It acts purely as a shell holding a `UInstancedStaticMeshComponent`.
+- **`ACrowdRenderHost` Allocation** — Spawned as a streamlined actor that is transient, non-replicated, with ticking and collision disabled. It acts purely as a shell holding a single `UInstancedStaticMeshComponent`.
 - **Frame-Rate-Independent Interpolation** — Utilizes `α = 1 − e^(−k·Δt)` (where k = `SmoothingRate`, defaulting to 15/s) to mask dead-reckoning positional corrections, preventing visual stuttering or popping.
-- **Re-Entry Identity Verification** — Uses an epoch validation tracker to determine if an agent was rendered on the immediate prior frame. This prevents re-entering entities from noticeably sliding across the screen from obsolete historical positions.
+- **Re-Entry Identity Verification** — Uses an `Epoch` validation tracker to determine if an agent was rendered on the immediate prior frame. This prevents re-entering entities from noticeably sliding across the screen from obsolete historical positions.
 - **Pre-Allocated Array Management** — The internal `Transforms` array is preserved across frames to avoid runtime heap fragmentation. Instance modifications are appended or truncated exclusively from the array tail to keep active index mapping stable.
-- **Unified Code Paths** — Standardizes execution behavior across standalone and listen hosts; server environments record initialization timestamps directly via `FillItem`, bypassing client-restricted `PostReplicatedAdd` hooks.
+- **Unified Code Paths** — Standardizes execution behavior across standalone and listen hosts; the authoritative side does not receive the `FCrowdAgentItem::PostReplicatedAdd*` callbacks, so `RecvTime` is recorded directly in the `FillItem` step.
 - **Nanite Evaluation** — Agents utilize simple low-poly geometries, making the heavy clustering overhead of Nanite sub-optimal for this specific instancing pipeline.
+- **Asynchronous Asset Loading** — The agent mesh / material are requested asynchronously through `FStreamableManager` when the bubble first arrives. This avoids stalling the game thread with a synchronous load, and the crowd is drawn from the next frame after loading finishes. If loading fails, an error is logged once and retries stop (`bHostFailed`).
 
 ### 10. Module Separation — `ClientOnly`
 
@@ -563,7 +733,7 @@ bool UCrowdRenderSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 
 ### 11. World Partition Streaming Anchor
 
-When server-side streaming is enforced (`wp.Runtime.EnableServerStreaming=1`), only active `PlayerControllers` register as valid replication streaming sources. Consequently, AI-inhabited zones devoid of human players would normally stream out. `AMassBubbleStreamingAnchor` resolves this by marrying **(1) a standard World Partition streaming source component and (2) a virtual crowd viewer token** into a single persistent coordinate entity.
+When server-side streaming is enabled (`wp.Runtime.EnableServerStreaming=1`), only `PlayerController`s are streaming sources by default, so an AI-only zone that nobody is watching gets unloaded. `AMassBubbleStreamingAnchor` attaches **(1) a WP streaming source and (2) a crowd viewer registration** to a single location, so that cell streaming and the NPC population follow the same reference point.
 
 ```cpp
 // World/MassBubbleStreamingAnchor.cpp — BeginPlay 
@@ -579,8 +749,151 @@ if (bStreamWorldPartition)  { StreamingSource->EnableStreamingSource(); }
 if (bRegisterAsCrowdViewer) { Crowd->RegisterVirtualViewer(this); }   // Forces server to simulate agents around this vector
 ```
 
-- Since virtual anchors bypass `ACrowdBubble` allocation, they double as highly efficient **headless stress-testing bots** (`-OptBots=N` or `opt.crowd.SpawnBots N`), allowing precise isolation of simulation, region mapping, and World Partition streaming overhead without network serialization cost.
+- Since virtual anchors bypass `ACrowdBubble` allocation, they double as highly efficient **headless stress-testing bots** (`-OptBots=N` or `opt.crowd.SpawnBots N`), allowing precise isolation of simulation, region mapping, and World Partition streaming overhead without network serialization cost. Replication cost has to be measured with real clients.
 - Placing anchors inside maps requires disabling **"Is Spatially Loaded"** within their World Partition configuration details; otherwise, the anchor would be culled by the very cell it is responsible for keeping active.
+- **Ramped creation / removal**: Bots are not created all at once. `opt.crowd.SpawnBots N` / `-OptBots=N` hand the work to `UCrowdSubsystem`, and `TickBotRamp` creates one every `BotRampIntervalSec` (default 1 s) (`ClearBots` also removes them one at a time, and bots not yet created are cancelled). This avoids a burst in which dozens of cells load / unload in a single frame and a GC follows, and `opt.crowd.BotRampSec 0` reproduces that burst.
+- **Low-priority streaming source**: A bot's source is `EStreamingSourcePriority::Low`, so the cells that real players are waiting for load first. The server also does not wait on slow loading (`wp.Runtime.BlockOnSlowStreaming=0`).
+- **Load only vs. Activate**: When `opt.crowd.BotActivateCells` is `1` (default), bots raise cells all the way to Activated (component registration · BeginPlay · tick) like a player, reproducing the heaviest load; with `0` they raise them only to Loaded. A Mass crowd needs no Actors, so `0` is enough if you only want to keep the population alive.
+- **Deferred spawn**: The order is `SpawnActorDeferred` → `ConfigureAsRuntimeBot()` → `FinishSpawning`. The streaming source is enabled at `BeginPlay`, so its priority and target state must be set before that.
+- **Concentric placement**: Bots are split across 3 orbits centered on the origin (radius × 1.0 / 0.75 / 0.5) and circle at a constant speed, so their active areas overlap less. They are `RF_Transient` and are not saved.
+
+### 12. World Partition Load / Unload Optimization
+
+#### ⚠️ The Problem
+* Loading / unloading a World Partition cell triggers component registration / unregistration and an engine-forced GC.
+* When a dedicated server's frame is delayed, **the ticks of every connected player are delayed with it**.
+* If a large-scale NPC spawn / despawn overlaps with that timing, it causes a severe frame drop (hitch).
+
+#### 🛠️ Optimizations Applied
+* **Spreading engine work:** Engine load that used to be concentrated in a single frame is spread across several frames.
+* **Deferring heavy work:** **Heavy work (GC and structural changes)** is scheduled and deferred to streaming-idle moments.
+* **Sharper cause identification:** When a residual performance drop (hitch) still occurs, **log classification** makes it possible to trace and identify the cause of the bottleneck clearly.
+
+
+```mermaid
+flowchart LR
+    WP["World Partition<br/>cell state change<br/>Loading / MakingVisible / MakingInvisible / Unloaded"]
+    MON["UMassBubbleStreamingMonitor<br/>busy cell set · GC info"]
+    CROWD["UCrowdSubsystem::PumpRegionJobs<br/>NPC spawn / despawn budget"]
+    GC["Quiet GC<br/>ForceGarbageCollection(false)"]
+    LOG["[Hitch] log<br/>GC · WP · crowd state"]
+
+    WP -- "OnLevelStreamingStateChanged" --> MON
+    MON -- "shrink the time limit 1.0 → 0.25 ms when streaming is overloaded" --> CROWD
+    MON -- "no load for 0.75 s after a level unload<br/>(or after 20 s)" --> GC
+    MON -- "frames over opt.hitch.LogMs" --> LOG
+```
+
+| Step | Component | Role |
+|---|---|---|
+| ① Spread | Engine streaming CVar profile | Lowers the per-frame time limit for AddToWorld / RemoveFromWorld and limits the number of cells loading at once |
+| ② Detect · yield | `UMassBubbleStreamingMonitor` → `UCrowdSubsystem` | While cells are loading / being added / being removed, shrinks the NPC spawn / despawn budget from 1.0 to 0.25 ms |
+| ③ Defer | Quiet GC | Suppresses the GC right after a cell unload and runs it when there is no World Partition load |
+| ④ Attribute | Hitch log | For every long frame, records the GC · WP · crowd state together so the cause can be told apart |
+| ⑤ Reproduce load · isolate | Bot ramp, Snapshot Scope | Reproduces streaming load without bunching it into a single moment, and removes the cost of regions that are not replicated |
+
+#### ① Engine Streaming CVar Profile
+
+During engine level streaming, the load / unload work of a single cell is spread out to fit a <b>per-frame budget limit (time-slicing)</b>. A profile that tunes this limit and the number of cells loading at once for server use lives in `Core/MassBubbleRuntimeConfig.cpp` and is applied once when the first world starts.
+
+| CVar | Value | Applies To | Purpose |
+|---|---|---|---|
+| `s.ForceGCAfterLevelStreamedOut` | 0 | Common | Turns off the GC the engine forces right after a cell unload; ③ Quiet GC runs instead |
+| `s.LevelStreamingActorsUpdateTimeLimit` | 3.0 | Common | Per-frame time limit (ms) for AddToWorld (adding a cell's actors to the world) |
+| `s.PriorityLevelStreamingActorsUpdateExtraTime` | 2.0 | Common | Extra time (ms) given to priority cells |
+| `s.LevelStreamingComponentsRegistrationGranularity` | 4 | Common | Number of components registered between clock checks. The smaller it is, the less the time limit is overshot |
+| `s.UnregisterComponentsTimeLimit` | 1.0 | Common | Per-frame time limit (ms) for RemoveFromWorld (unregistering a cell's components) |
+| `s.LevelStreamingComponentsUnregistrationGranularity` | 2 | Common | Number of components unregistered between clock checks |
+| `wp.Runtime.BlockOnSlowStreaming` | 0 | Dedicated server | Does not stall the server tick (= all players) even if a cell is still loading |
+| `wp.Runtime.MaxLoadingLevelStreamingCells` | 2 | Dedicated server | Limits the number of cells loading at once → reduces bursts of PostLoad / registration work |
+
+```cpp
+// Core/MassBubbleRuntimeConfig.cpp — ApplyStreamingProfile (abridged)
+IConsoleVariable* Var = IConsoleManager::Get().FindConsoleVariable(Entry.Name);
+if (Var == nullptr)
+{
+	/* CVar that does not exist in this engine version: log a warning and skip it */
+}
+else if (Var->GetFlags() & ECVF_ReadOnly)
+{
+	/* read-only: warn that it has to be put in DefaultEngine.ini [SystemSettings] */
+}
+else
+{
+	Var->Set(Entry.Value, ECVF_SetByProjectSetting);   // ini / command line / console always take precedence
+	// if the value after applying differs from the profile value, warn that "a higher-priority source owns it"
+}
+```
+
+- **Priority**: Because the value is set with `ECVF_SetByProjectSetting`, `DefaultEngine.ini [SystemSettings]`, command-line and console values always take precedence. If a value is not applied as intended, a warning is logged.
+- **Engine-version guard**: A CVar that does not exist in this engine version is skipped with a warning at startup (so a name changed by an engine upgrade is not silently ignored).
+- **Scope**: The two `wp.Runtime.*` entries apply only in the dedicated-server process (`EProfileScope::ServerOnly`). They are not touched on clients / standalone.
+- **Verification**: The startup log contains `[Stream] <CVar> = <value> (was <previous value>)`, and `opt.stream.Dump` shows each entry's current value · profile value · status (`profile value active` / `DIFFERENT from profile` / `MISSING in this engine version` / `not used by this process`). `opt.stream.Apply` re-applies the profile at runtime, and with `opt.stream.ApplyProfile 0` the engine defaults are left untouched (read when the first world starts).
+
+#### ② `UMassBubbleStreamingMonitor` — Watching Busy Cells
+
+- A `UTickableWorldSubsystem` created for every game / PIE world (commandlets excluded). It receives cell state changes through `FLevelStreamingDelegates::OnLevelStreamingStateChanged`; since that delegate is global, it processes **only the events of its own world** even when the server and the client live in a single process in PIE.
+- **Definition of busy**: A cell is busy while it is `Loading` / `MakingVisible` / `MakingInvisible`. The busy-cell set is held as `TWeakObjectPtr`, so a streaming level that disappears without a final state change cannot keep the world in a busy state forever (invalid entries are cleaned up every Tick).
+- `UCrowdSubsystem` reads `IsBusy()` / `GetNumBusyCells()` to set the NPC spawn / despawn budget. When it initializes, `UCrowdSubsystem` creates the Monitor first with `InitializeDependency`.
+- Per-frame counters (number of state changes · number of unloads · busy peak) are also stored separately, because a cell whose state processing finished within a long frame is no longer busy by the time the log is written (④). `StreamingBusyCells` is recorded in the CSV.
+
+#### ③ Quiet GC — Run the GC after a Cell Unload at a Moment with No Streaming Load
+
+The engine's default behavior is to force a GC immediately after a cell is unloaded (`s.ForceGCAfterLevelStreamedOut`). In stretches where cells are loaded / removed one after another, this GC lands on a frame that is already busy, so ① turns it off and the Monitor picks the timing itself.
+
+```cpp
+// Core/MassBubbleStreamingMonitor.cpp — ScheduleQuietGC (abridged)
+// PendingGCSince: the time at which we started waiting for a GC after a cell became Unloaded / Removed
+const bool bQuiet   = NumBusyCells == 0 && (Now - LastBusyTime) >= GCQuietSec;   // no cell activity for 0.75 s
+const bool bOverdue = (Now - PendingGCSince) >= GCMaxDeferSec;                   // runs after 20 s even if the load persists
+const bool bSpaced  = (Now - LastGCTime)     >= GCMinSpacingSec;                 // at least 5 s since the previous GC
+
+if (bSpaced && (bQuiet || bOverdue))
+{
+	bGCRequestedByUs = true;                                  // mark it so the Hitch log attributes it to "our quiet GC"
+	GEngine->ForceGarbageCollection(/*bForcePurge=*/false);   // keep purge incremental (a full purge lengthens the freeze)
+	PendingGCSince = -1.0;
+	LastGCTime = Now;
+}
+```
+
+- **Log**: When it runs, `[Stream] GC after cell unload: World Partition is quiet (waited N s)` or `waited long enough` is logged, so you can tell which path it ran through.
+- **GC measurement**: Pre / Post GC delegates record how long the GC held the game thread (lock wait + reachability analysis), the interval since the previous GC, and who started it (our Quiet GC / engine · other); ④ shows them.
+- **A/B**: `opt.stream.QuietGC 0` turns this path off. To compare against the engine's default behavior, also specify `s.ForceGCAfterLevelStreamedOut 1`. The thresholds are changed with `opt.stream.GCQuietSec` / `GCMaxDeferSec` / `GCMinSpacingSec`.
+
+#### ④ Hitch Log — Telling Causes Apart as GC / WP / crowd
+
+With `opt.hitch.LogMs N` (> 0), one line is logged for every frame longer than N ms. The delta that arrives in Tick is the length of the **previous frame**, so a hitch that just happened is recorded together with the state at that moment.
+
+```text
+[Hitch] previous frame <ms> ms (average <ms> ms) | GC in the last 2 frames: YES / no
+  | world partition: cells busy now=<n>, peak during the last frame=<n>, state changes=<n>, unloads=<n>
+  | last GC held the game thread <ms> ms (lock wait + reachability analysis), started <s> after the previous one,
+    started by: our quiet GC / engine / other, GCs seen: <n>, <n> frames ago | GC waiting after unload: yes / no
+  | crowd: regions spawning=<n> despawning=<n> | queues spawn=<n> despawn=<n> | snapshot regions=<n> | bot ops pending=<n>
+```
+
+(In practice it is printed on a single line.)
+
+- **GC is the cause**: `GC in the last 2 frames: YES` and `held the game thread` is long. If a GC with `started by: engine / other` shows up right after a cell unload, the profile has not been applied (`DIFFERENT from profile` in `opt.stream.Dump`).
+- **World Partition is the cause**: `peak during the last frame` / `state changes` are large. Even if the cell activity finished within a single frame, it remains as `peak`.
+- **NPC spawn / despawn is the cause**: `regions spawning` / `queues` are filled (the budget is insufficient, or `opt.crowd.BudgetedPump 0`).
+
+This item depends on the engine's level-streaming and GC behavior, so it is not an Automation Test target. The size of the effect is measured with the `opt.hitch.LogMs` log and the A/B switches in [Instrumentation and Experiment Design](#instrumentation-and-experiment-design).
+
+#### Editor Verification — World Partition (PIE)
+
+<p align="center">
+  <img src="Image/Worldpartition_Runtime_Hash.png" alt="World Partition Runtime Hash 2D overlay and Output Log" width="905"><br>
+  <sub>Standalone PIE · <code>L_MassBubbleWorld</code> · after running <code>opt.crowd.SpawnBots 2</code> — Runtime Hash 2D overlay and Output Log</sub>
+</p>
+
+- **3 streaming sources**: `PlayerController_0` (Priority 128, Blocking) and `MassBubbleStreamingAnchor2` / `MassBubbleStreamingAnchor3` (Priority 192, NonBlocking, Activated) are each shown as a circle. The anchor sources request cells at a lower priority (Low = 192) than the real player.
+- **Anchor orbits**: The two anchors' positions (13185, 43024) · (−58866, −11608) are about 45,000 cm / 60,000 cm from the origin, matching `SpawnBot`'s concentric placement (`BotOrbitRadiusCm` × 0.75 / 1.0). The displayed speed of 33 mi/h also equals `BotSpeedCmPerSec` (1500 cm/s ≈ 15 m/s).
+- **Cell states**: By the legend, Loaded Visible is 59, Unloaded Still Around is 7, and Loading · Making Visible is 0, and the top shows `Streaming Status: (Idle)` · `Streaming Performance: Good`.
+- **Quiet GC**: The 8 captured `[Stream] GC after cell unload: World Partition is quiet (waited …)` log lines are all on the "quiet" path, and the wait times are 5.0–14.0 s, within `GCMaxDeferSec` (20 s). The GC runs when there is no streaming load, not right after a cell unload.
+- **Streaming performance log**: Right after `SpawnBots`, the engine's `Streaming performance changed` log swings between Good ↔ Immediate / Slow / Critical but returns to Good at the end. This capture is from the heaviest setting, where bots raise cells to `Activated` (`opt.crowd.BotActivateCells 1`, the default).
+- **Scope**: It is Standalone PIE, so the dedicated-server-only entries (`wp.Runtime.*`, ①) are not applied in this environment. The applied state in a server process is checked with `opt.stream.Dump`.
 
 ---
 ## Instrumentation and Experiment Design
@@ -588,10 +901,13 @@ if (bRegisterAsCrowdViewer) { Crowd->RegisterVirtualViewer(this); }   // Forces 
 A consolidated tracking macro couples multiple profiling layers into a clean, single-statement interface.
 
 ```cpp
-// Core/MassBubbleStats.h — Generates cycle metrics, CSV diagnostics, and deep Insights trace tokens simultaneously
-#define OPT_SCOPE(StatId, CsvName, TraceName) 	SCOPE_CYCLE_COUNTER(StatId); 	CSV_SCOPED_TIMING_STAT(OptCrowd, CsvName); 	TRACE_CPUPROFILER_EVENT_SCOPE_STR(TraceName)
+// Core/MassBubbleStats.h — one line emits a cycle stat + CSV timing + Insights trace event
+#define OPT_SCOPE(StatId, CsvName, TraceName) \
+	SCOPE_CYCLE_COUNTER(StatId); \
+	CSV_SCOPED_TIMING_STAT(OptCrowd, CsvName); \
+	TRACE_CPUPROFILER_EVENT_SCOPE_STR(TraceName)
 
-// Direct application example
+// Usage example (CrowdBubble.cpp)
 OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 ```
 
@@ -599,12 +915,28 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 - **Metric Aggregation Profiling** — Logs historical timing intervals via low-overhead `CSV_SCOPED_TIMING_STAT` macros for spreadsheet analysis.
 - **Timeline Verification** — Maps fine-grained thread execution tracks directly inside Unreal Insights via string tokens.
 
-| Profiling Utility | Target Context | Monitored Metrological Metrics |
+| Tool | How to Use | What You Can See |
 |---|---|---|
-| Engine Stats | Server: `stat OptCrowd`<br/>Client: `stat OptRender` | Real-time monitoring of simulation cycles (Director, Spawning, LOD, Movement, Snapshots, Bubble diffs), live counters (Agents Alive, Active Regions, Simulating Count, Packet tracking, Visible Actors). |
-| Unreal Insights | Boot Parameter: `-trace=cpu,net,frame` | Deep chronological timeline visualizer for `Opt.Crowd.*` pipelines and fine-grained Network Serialization channels. |
-| CSV Profiler | Console: `csvprofile start / stop` | Records lightweight telemetry arrays (`OptCrowd` and `OptRender` tracking blocks) across Test/Shipping builds. |
-| Diagnostic Logging | Console: `opt.crowd.Stats` | Outputs text arrays capturing active region states, precise LOD distributions, queue bounds, and live configuration status. |
+| Stat | Server `stat OptCrowd` · client `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble cycles, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` (screen example below) |
+| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*` and `Opt.Render.Update` scopes, Networking Insights (per-packet `CrowdBubble` / `AgentArray` bit counts, distinguishing the Iris · legacy replication path — captures in §6) |
+| CSV Profiler | `csvprofile start` / `csvprofile stop` | Categories `OptCrowd` (including `StreamingBusyCells`) and `OptRender` (also works in Test builds) |
+| Log | `opt.crowd.Stats` | Count per region state, LOD tier distribution, viewer count, spawn / despawn queue lengths, snapshot region count, pending bot operations, WP busy cells · last GC summary, current switch values |
+| Hitch Log | `opt.hitch.LogMs <ms>` | For every frame over the threshold: GC (duration · interval · who started it) · WP cell activity · crowd state |
+| Streaming Profile | `opt.stream.Dump` | Per-entry current value · profile value · status of the engine streaming CVar profile |
+
+### Stat Screen Example — `stat OptCrowd` · `stat OptRender`
+
+<p align="center">
+  <img src="Image/MassBubble_CVar.PNG" alt="stat OptRender / stat OptCrowd screen" width="800"><br>
+  <sub>PIE viewport with <code>stat OptRender</code> · <code>stat OptCrowd</code> turned on together (Opt Render / Opt Crowd groups)</sub>
+</p>
+
+Because PIE runs the server and client logic in one process, both groups appear on one screen. This capture was taken with 10,000 agents and 1 viewer; its session conditions differ from the earlier captures, so the values are not compared directly. It is not a benchmark: it is meant to check that the instrumentation works and that the scale of the values matches the design.
+
+- **Opt Crowd · cycle counters**: `LOD Processor` 0.06 ms, `Movement Processor` 0.05 ms, `Director Tick` ≈ 0 ms (Inclusive Avg). `Snapshot Processor` (avg 0.03 ms, max 0.28 ms) and `Bubble Update` (avg 0.02 ms, max 0.18 ms) run only at `ReplicationHz` (10 Hz), so their CallCount is 0 in most frames; read the cost of a frame in which they ran from the max value, not the average. `Region Spawn Slice` / `Region Despawn Slice` are empty, so no regions were created or deleted in this window.
+- **Opt Crowd · counters**: `Agents Alive` is 10,000 and `Active Regions` is 25 (= 400 agents × 25 regions, the 5×5 of one viewer). The agents that received a movement update per frame (`Agents Simulated / frame`) average ≈ 737 (716–754), on the same scale as the analytical estimate (≈ 830 / 10,000) in [Design Figures](#design-figures).
+- **Replication scale**: `Bubble Items` is 400 (= the `MaxAgentsPerBubble` cap), and of those `Bubble Dirty Items` is 8–19. Only newly entered agents and agents that exceeded the dead-reckoning tolerance become update targets. The averages (53.33 / 1.52) look low because the bubble update happens only at `ReplicationHz` (10 Hz), which pulls the per-frame average down.
+- **Opt Render · client**: `Crowd Render Update` is 0.08 ms (max 0.18 ms), and `Agents Drawn` 400 agents are drawn with one ISM.
 
 ### A/B Kill Switches (CVars)
 
@@ -612,17 +944,29 @@ All optimization modules expose dedicated CVars for real-time deactivation. To i
 
 | Console Variable (CVar) | Default Value | Isolated Testing Context |
 |---|---|---|
-| `opt.crowd.Enable` | 1 | Global master switch; completely disables the crowd simulation pipeline. |
-| `opt.crowd.TimeSlicing` | 1 | `0` forces every agent to simulate every tick, isolating time-slice distribution efficiency. |
-| `opt.crowd.LOD` | 1 | `0` forces all agents to High LOD, isolating distance classification logic and execution weights. |
-| `opt.crowd.ParallelMove` | 1 | `0` forces single-threaded chunk processing, measuring concurrent multi-threading gains. |
-| `opt.crowd.Replicate` | 1 | `0` completely suspends high-frequency snapshots, **isolating core simulation cost**. |
-| `opt.crowd.DeadReckoning` | 1 | `0` falls back to the naive replication baseline, exposing network serialization and delta savings. |
-| `opt.crowd.ReplicationHz` | 0 | Overrides default project snapshot frequencies when set to values > 0. |
-| `opt.crowd.Render` (Client) | 1 | `0` hides character rendering, **isolating network cost from GPU draw overhead**. |
-| `opt.crowd.RenderStats` (Client)| 0 | `1` draws debug telemetry overlays (current bubble array lengths, drawn count, tick intervals) in non-shipping builds. |
+| `opt.crowd.Enable` | 1 | Simulation master switch. Even with `0` the bots keep running, so this **isolates only the engine streaming cost**. |
+| `opt.crowd.TimeSlicing` | 1 | `0` = update every agent every frame → the effect of time-slicing. |
+| `opt.crowd.LOD` | 1 | `0` = everyone at High LOD → LOD classification and movement workload. |
+| `opt.crowd.ParallelMove` | 1 | `0` = single-threaded `ForEachEntityChunk` → the effect of parallelization. |
+| `opt.crowd.Replicate` | 1 | `0` = stops snapshot / bubble updates → **isolates only the simulation cost**. |
+| `opt.crowd.DeadReckoning` | 1 | `0` = re-send moving agents every tick → bandwidth · serialization cost. |
+| `opt.crowd.ReplicationHz` | 0 | When `> 0`, overrides the project setting's Replication Hz. |
+| `opt.crowd.BudgetedPump` | 1 | `0` = spawn / despawn a fixed number per frame (no wall-clock budget) → **reproduces the streaming hitch**. |
+| `opt.crowd.SnapshotScope` | 1 | `0` = snapshot every live region (previous behavior) → the effect of the snapshot scope. |
+| `opt.crowd.BotRampSec` | -1 | Bot creation / removal interval (seconds). `0` = all in one frame (burst), `< 0` = the project setting (`BotRampIntervalSec`). |
+| `opt.crowd.BotActivateCells` | 1 | For bots created afterwards, `1` = raise cells to Activated (BeginPlay · registration · tick, like a player), `0` = only to Loaded (lighter load). |
+| `opt.stream.ApplyProfile` | 1 | `0` = do not apply the engine streaming CVar profile (read when the first world starts). |
+| `opt.stream.QuietGC` | 1 | `0` = do not schedule a Quiet GC after a cell unload. |
+| `opt.stream.GCQuietSec` | 0.75 | "Idle" when the time with no cell loading / adding / removing is at least this value. |
+| `opt.stream.GCMaxDeferSec` | 20 | Even if a moment with no streaming load never comes, run the GC after waiting this long. |
+| `opt.stream.GCMinSpacingSec` | 5 | Minimum interval between Quiet GCs. |
+| `opt.hitch.LogMs` | 0 | `> 0` = for every frame longer than this time (ms), log the GC / WP / crowd state. |
+| `opt.crowd.Render` (client) | 1 | `0` = hide NPC rendering → **isolates only the network cost**. |
+| `opt.crowd.RenderStats` (client) | 0 | `1` = print the bubble size / drawn count / updates in the last 1 s / replication system (Iris · legacy) on screen (non-shipping). |
 
-*Debug Commands (Non-Shipping)*: `opt.crowd.Stats` · `opt.crowd.SpawnBots [Count]` · `opt.crowd.ClearBots` · `opt.crowd.Reload` (Hot-reloads settings arrays while preserving grid constraints).
+Console commands (non-shipping): `opt.crowd.Stats` · `opt.crowd.SpawnBots [N=4]` (1–64) · `opt.crowd.ClearBots` · `opt.crowd.Reload` (reloads settings; region / grid sizes are kept until the world restarts).
+
+Streaming / network inspection commands: `opt.stream.Apply` (re-apply the profile) · `opt.stream.Dump` (current value per entry) · `opt.net.Info` (logs Iris / legacy and the related CVars). These commands, `opt.stream.*` and `opt.hitch.LogMs` have no `UE_BUILD_SHIPPING` guard, so they are compiled into Shipping servers too, and the logs are kept with `bUseLoggingInShipping = true`.
 
 ### Measurement Procedure
 
@@ -645,6 +989,26 @@ opt.crowd.Replicate 0          # Completely isolates pure simulation overhead
 opt.crowd.Render 0             # Isolates network processing cost from rendering overhead
 opt.crowd.RenderStats 1
 ```
+
+### Streaming Hitch Measurement Procedure
+
+```text
+# Server console (or -ExecCmds)
+opt.hitch.LogMs 20                 # [Hitch] log (with GC / WP / crowd state) for every frame longer than 20 ms
+opt.stream.Dump                    # current state of the engine streaming CVar profile
+opt.crowd.SpawnBots 8              # bots join at BotRampSec intervals → triggers cell load / unload
+
+# A/B: change only one at a time
+opt.crowd.BudgetedPump 0           # spawn / despawn a fixed number per frame (reproduces the streaming hitch)
+opt.crowd.BotRampSec 0             # create all bots in one frame (burst)
+opt.stream.QuietGC 0               # Quiet GC off
+s.ForceGCAfterLevelStreamedOut 1   # engine default (GC right after a cell unload) — use together with opt.stream.QuietGC 0
+opt.crowd.SnapshotScope 0          # snapshot every live region
+opt.crowd.BotActivateCells 0       # bots created afterwards only load cells (lighter load)
+opt.crowd.Enable 0                 # turn the crowd off and keep only the bots → isolates only the engine streaming cost
+```
+
+`opt.stream.ApplyProfile` is read once when the first world starts (re-apply it afterwards with `opt.stream.Apply`).
 
 ---
 
@@ -675,6 +1039,8 @@ TestEqual(TEXT("Hysteresis: zero rebases occur during boundary position jitter")
 TestTrue(TEXT("(Baseline Contrast) Naive rounding would trigger over 150 thrashing flips"), NaiveFlips > 150);
 ```
 
+> The Automation Tests verify the integrity of the pure logic. Whether the world, Mass and networking actually work was checked with editor PIE captures — the Mass Debugger, Unreal Insights, the World Partition overlay and log, the stat screen ([Instrumentation and Experiment Design](#instrumentation-and-experiment-design)), and the project settings screen ([Configuration](#configuration)). The replication path (Iris / legacy) was checked with Network Insights packet captures (§6).
+
 ---
 
 ## Design Figures
@@ -695,8 +1061,31 @@ These figures represent **theoretical limits derived from algorithmic constants*
 | Max Bubble Payload (Full Resend Sync) | ≈ 4 KB | 400 agents × 10 bytes (excluding array envelope and packet overheads) |
 | Sliding Lattice Rebase Frequency | ≈ 1 rebase per 200m traveled | 200m spatial grid mapping boundaries |
 | Client-Side Actor Allocation | 1 Actor / 1 Component | Unified Instanced Static Mesh orchestration |
+| Snapshot Target Regions (1 Viewer) | Up to 16 (out of 25 active) | Regions covered by the rectangle of radius (15,000 + 2,000) cm (≤ 4 × 4) |
+| NPC Spawn / Despawn Budget | 1.0 ms / frame (0.25 ms under heavy WP load), batches of 64 agents | `SpawnBudgetMs` · `SpawnBudgetBusyMs` · `StructuralBatchSize` |
+| Quiet GC Timing | Run after 0.75 s idle, deferred at most 20 s, at least 5 s apart | `GCQuietSec` · `GCMaxDeferSec` · `GCMinSpacingSec` |
 
 > *Note: The active movement operation count isolates agents executing high-cost wander and position integration logic. The minor O(N) overhead incurred by the Mass processor while scanning chunk segments and branching past skipped entities is calculated separately.*
+
+<!--
+Measured-results template (after measuring, uncomment this and fill in the values.
+Delete the rows you did not measure, rename the section title to "Design Figures and Measurements", and update the table-of-contents link too.)
+
+### Measured Results
+
+> Test environment: CPU / RAM / OS · build configuration (Development or Test) · server tick rate · number of bots · number of clients
+
+| Experiment | Switch | Metric | OFF | ON | Improvement |
+|---|---|---|---|---|---|
+| Time-slicing | `opt.crowd.TimeSlicing` 0 → 1 | `Opt.Crowd.Move` (ms / frame) | | | |
+| LOD | `opt.crowd.LOD` 0 → 1 | `Agents Simulated / frame` | | | |
+| Parallel movement | `opt.crowd.ParallelMove` 0 → 1 | `Opt.Crowd.Move` wall time (ms) | | | |
+| Dead reckoning | `opt.crowd.DeadReckoning` 0 → 1 | `Bubble Dirty Items`, server send volume (KB/s) | | | |
+| Render separation | `opt.crowd.Render` 0 → 1 (client) | `Crowd Render Update` (ms) | | | |
+| Streaming budget | `opt.crowd.BudgetedPump` 0 → 1 (trigger a burst with `opt.crowd.BotRampSec 0`) | Max frame time, number of `[Hitch]` logs | | | |
+| Quiet GC | `opt.stream.QuietGC` 0 + `s.ForceGCAfterLevelStreamedOut` 1 → Quiet GC | Time the GC held the game thread (`[Hitch]` log), number of GCs while cells were busy | | | |
+| Snapshot Scope | `opt.crowd.SnapshotScope` 0 → 1 (many bots) | `Opt.Crowd.Snapshot` (ms / snapshot), `snapshot regions` | | | |
+-->
 
 ---
 
@@ -707,6 +1096,7 @@ These figures represent **theoretical limits derived from algorithmic constants*
 - **Unreal Engine 5.8** — Compiling standalone `MassBubbleServer` and `MassBubbleClient` targets requires an engine built from source.
 - **Mass Modules** — Requires `MassEntity`, `MassCommon`, and `MassSimulation`, alongside `MassCore` (introduced in UE 5.8). *To down-port to UE 5.7 or earlier, remove the `MassCore` reference from `MassBubble.Build.cs`.*
 - **Push Model Activation** — Must be explicitly enabled in your configuration layout: `[SystemSettings] net.IsPushModelEnabled=1`. If disabled, properties fall back to standard comparative evaluation channels.
+- **(Optional) Iris** — Turn it on with `-UseIrisReplication=1` (or `net.Iris.UseIrisReplication`). Iris requires `net.SubObjects.DefaultUseSubObjectReplicationList=1`, and `opt.net.Info` logs the current settings.
 - **World Layout** — Requires a World Partition map paired with server-side streaming enabled: `wp.Runtime.EnableServerStreaming=1`.
 
 ### Build Compilation
@@ -721,11 +1111,15 @@ Engine\Build\BatchFiles\Build.bat MassBubbleClient Win64 Development -Project="D
 
 ```bash
 # 1) Fire up the Dedicated Server loaded with 8 virtual simulation stress-testing bots
-#    (Simulates deep chunk loops, region tracking, and World Partition streaming without network serialization cost)
+#    (Simulates deep chunk loops, region tracking, and World Partition streaming without network serialization cost; bots join at 1 s intervals)
 MassBubbleServer.exe /Game/Maps/L_MassBubbleWorld -log -OptBots=8
 
 # 2) Spin up a dedicated game client instance to monitor network replication and rendering performance
 MassBubbleClient.exe 127.0.0.1 -log
+
+# 3) Choosing the replication system: compare Iris / legacy with the same build (verify with the console command opt.net.Info)
+MassBubbleServer.exe /Game/Maps/L_MassBubbleWorld -log -UseIrisReplication=1    # 0 = legacy
+MassBubbleClient.exe 127.0.0.1 -log -UseIrisReplication=1
 ```
 
 When evaluating inside the Unreal Editor, configuring **Play As Client + Run Dedicated Server** schedules both environments smoothly inside a unified process (the developer target `MassBubbleEditor` compiles both components). Character controls follow traditional WASD / E / Space / Q formatting, locked to a fly-cam layout configured to cross a 128m region boundary every 4 seconds at 30m/s for severe streaming stress testing.
@@ -750,7 +1144,7 @@ Custom configuration properties are exposed via **Project Settings > Game > Mass
 | | `ActiveRegionRadius` | 2 | Proximity radius of active simulated cells relative to a viewer (Chebyshev grid, 2 = 5×5 matrix). |
 | | `AgentsPerRegion` | 400 | Targets population capacity allocated to every active region. |
 | | `RegionDeactivateDelaySec` | 10 | Despawn grace period to prevent thrashing along region lines. |
-| | `MaxSpawnPerFrame` / `MaxDespawnPerFrame` | 500 / 1000 | Maximum entity instantiation and destruction constraints allowed per frame. |
+| | `MaxSpawnPerFrame` / `MaxDespawnPerFrame` | 500 / 1000 | Hard caps on spawns / despawns per frame (the effective limit is the wall-clock budget under **Streaming** below). |
 | **LOD Metrics** | `High` / `Medium` / `LowLODDistanceCm` | 4000 / 10000 / 20000 | Precision tier distance boundaries (40m / 100m / 200m). |
 | | `LODHysteresisCm` | 500 | Linear overlap distance buffer protecting quality tier transitions. |
 | | `High` / `Medium` / `Low` / `OffIntervalFrames` | 1 / 2 / 6 / 0 | Frame interval configurations mapping execution ticks (0 = frozen). |
@@ -764,11 +1158,36 @@ Custom configuration properties are exposed via **Project Settings > Game > Mass
 | | `NearDistanceCm` | 3000 | Radial boundary separating near vs. far dead-reckoning tolerance zones. |
 | | `VelocityEpsCmPerSec` | 25 | Velocity deviation threshold that forces a proactive network sync. |
 | | `GridCellSizeCm` | 1600 | Dimension size allocated to internal spatial sorting grid buckets. |
+| **Streaming** | `SpawnBudgetMs` / `DespawnBudgetMs` | 1.0 / 1.0 | Per-frame wall-clock budget (ms). The clock is checked after every batch, and at least one batch per frame always proceeds. |
+| | `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs` | 0.25 / 0.25 | Budget while World Partition cells are loading / being added / being removed (0 allowed, clamped to at most the normal budget). |
+| | `StructuralBatchSize` | 64 | Number of agents per `BatchCreateEntities` / `BatchDestroyEntities` call (8–2048). |
+| | `SnapshotMarginCm` | 2000 | Margin that widens the snapshot scope beyond the real player's bubble radius. |
 | **Stress Bots** | `BotOrbitRadiusCm` / `BotSpeedCmPerSec` | 60000 / 1500 | Travel orbit configuration paths tracking virtual test bots. |
+| | `BotRampIntervalSec` | 1 | Bot creation / removal interval (seconds). 0 = all in one frame. |
 | **Client Render** | `MaxInstances` | 2048 | Max buffer instance limits assigned to client components. |
 | | `MaxExtrapolationSec` | 1.5 | Max time window allowed for dead-reckoning linear extrapolation projections. |
 | | `SmoothingRate` | 15 | Exponential smoothing factor (1/s, set to 0 to disable interpolation snapping). |
 | | `BubbleSearchIntervalSec` | 1 | Intermittent polling rate used to acquire local player bubble references. |
+
+These are the Project Settings screens (default values, saved in `DefaultGame.ini`), and they match the values in the table above.
+
+<table>
+  <tr>
+    <td align="center" valign="top"><img src="Image/MassBubble_Crowd_Setting1.PNG" alt="MassBubble Crowd settings - Regions / LOD" width="410"></td>
+    <td align="center" valign="top"><img src="Image/MassBubble_Crowd_Setting2.PNG" alt="MassBubble Crowd settings - Movement / Replication / Streaming / Bots" width="324"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Game › MassBubble Crowd — Regions · LOD</sub></td>
+    <td align="center"><sub>Game › MassBubble Crowd — Movement · Replication · Streaming · Bots</sub></td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="Image/MassBubble_Crowd_Rendering_Setting1.PNG" alt="MassBubble Crowd Rendering settings" width="560"><br>
+  <sub>Game › MassBubble Crowd Rendering — this is a ClientOnly module, so a dedicated server does not load this class</sub>
+</p>
+
+The streaming profile (`s.*` / `wp.*`) and the Quiet GC · hitch-log thresholds are CVars (`opt.stream.*`, `opt.hitch.LogMs`), not project settings. See the A/B kill switch table in [Instrumentation and Experiment Design](#instrumentation-and-experiment-design).
 
 ---
 
@@ -784,6 +1203,10 @@ Custom configuration properties are exposed via **Project Settings > Game > Mass
 | Region-bound ownership of entity states. | Decouples population lifespan from World Partition streaming mechanics, ensuring seamless restoration. | Requires writing customized sub-state machinery, serialization memory tables, and region migration logic. |
 | Isolated POD snapshot configuration caches. | Enables lock-free, thread-safe configuration parsing across multiple concurrent worker threads. | Fixes spatial sorting structures and region layout constraints during hot reloads (`bKeepGeometry`). |
 | Decentralized per-region uniform spatial grids. | Keeps lookup arrays small, cache-friendly, and completely performance-isolated from overall world dimensions. | Queries traversing across region boundaries must execute lookup checks across multiple adjacent grid networks. |
+| Quiet GC (deferring the GC after an unload). | Moves the freeze that the forced GC right after a cell unload would cause to a moment with no streaming. | Objects that could be freed stay in memory for up to `GCMaxDeferSec` (20 s). If cells keep changing, an idle moment never arrives and the GC runs through the overdue path. |
+| Wall-clock spawn / despawn budget. | Puts a time cap on NPC creation / deletion cost even during streaming. | A large region is filled over several frames (nearest regions first). There is a clock-check cost per batch. |
+| Engine streaming CVar profile. | Spreads engine work such as AddToWorld / RemoveFromWorld across frames. | Because per-frame throughput is reduced, it can take more frames for a cell to be reflected in the world. CVar names / existence depend on the engine version (check with `opt.stream.Dump`). |
+| Snapshot Scope. | Skips the grid build for bot-only regions. | A region outside the scope has a stale grid, so it must be excluded from queries → this creates an invariant that the snapshot scope (including `SnapshotMarginCm`) must always cover the bubble's query range. |
 
 ---
 
@@ -793,12 +1216,14 @@ Custom configuration properties are exposed via **Project Settings > Game > Mass
 |---|---|
 | `MassBubble.{h,cpp}` | Game module bootstrap initialization; declares primary `LogMassBubble` tracking definitions. |
 | `Core/MassBubbleStats.{h,cpp}` | Declares performance logging groups, CSV configurations, and the `OPT_SCOPE` macro. |
+| `Core/MassBubbleStreamingMonitor.{h,cpp}` | Watches WP cells for busy state, Quiet GC, GC measurement, and the hitch log (every game / PIE world). |
+| `Core/MassBubbleRuntimeConfig.{h,cpp}` | Engine streaming CVar profile, the `opt.stream.*` · `opt.hitch.LogMs` CVars, `opt.stream.Apply` / `Dump`, and `opt.net.Info`. |
 | `Crowd/CrowdTypes.h` | Defines base structures: `ECrowdLOD`, `FCrowdTuning` (POD), and `FCrowdSavedAgent`. |
 | `Crowd/CrowdFragments.h` | Holds pure ECS declarations defining Mass tags and architectural agent data fragments. |
 | `Crowd/CrowdMath.h` | Pure header-only mathematics: xorshift32, avalanche hashing algorithms, LOD hysteresis, and region transforms. |
 | `Crowd/CrowdCellGrid.h` | Pure header-only execution of the counting-sort uniform spatial grid. |
 | `Crowd/CrowdSettings.{h,cpp}` | Manages `UDeveloperSettings`, console variables, and immutable tuning configurations. |
-| `Crowd/CrowdSubsystem.{h,cpp}` | Controls region state machines, streaming evaluation, batch allocation, and snapshot caching. |
+| `Crowd/CrowdSubsystem.{h,cpp}` | Controls region state machines, viewers, wall-clock-budgeted spawning / despawning, snapshot caching (with scope), and the bot ramp. |
 | `Crowd/CrowdDirector.{h,cpp}` | Game-thread driver responsible for managing structural spawning transitions. |
 | `Crowd/CrowdProcessors.{h,cpp}` | Implements the core Mass processor loops (LOD evaluation, Movement simulation, Snapshot capturing). |
 | `Net/CrowdNetMath.h` | Pure header-only network architecture: data quantization compression, sliding lattice mapping, and dead reckoning. |
@@ -808,5 +1233,6 @@ Custom configuration properties are exposed via **Project Settings > Game > Mass
 | `World/MassBubbleStreamingAnchor.{h,cpp}` | Server virtual viewer source combining WP cell hooks and headless stress testing bots. |
 | `CrowdConsole.cpp` | Registers non-shipping `opt.crowd.*` diagnostic developer tools. |
 | `CrowdTests.cpp` | Implements the four high-coverage verification automation unit tests. |
-| `MassBubbleRender/` | Isolated Client-Only module housing `CrowdRenderSubsystem`, `CrowdRenderHost`, and render settings. |
+| `MassBubbleRender/` | Isolated Client-Only module housing `CrowdRenderSubsystem`, `CrowdRenderHost`, and `CrowdRenderSettings`. |
 | `*.Build.cs`, `*.Target.cs` | Declares isolated compilation rules mapping Client, Server, Game, and Editor configurations. |
+| `Image/` | README captures (Mass Debugger · Unreal Insights · Network Insights · World Partition · stat · project settings). |

@@ -23,8 +23,6 @@
 - [설계 수치](#설계-수치)
 - [시작하기](#시작하기)
 - [설정](#설정)
-- [시스템 구조 선택과 최적화 비용](#시스템-구조-선택과-최적화-비용)
-- [코드 맵](#코드-맵)
 
 ---
 
@@ -58,8 +56,8 @@ NPC 규모가 커져도 아래 네 가지 비용이 모두 **관측 가능한 �
 | 공간 탐색 | 실제 플레이어의 bubble에 닿는 region만 snapshot | 봇 전용 region은 grid 구축(복사 + counting sort) 생략 | `CrowdSubsystem.cpp` |
 | 복제 | **플레이어당 Actor 1개로 제한** (`bOnlyRelevantToOwner` + `COND_OwnerOnly`) + **Push Model** | NPC당 ActorChannel 제거, 변경 사항(Dirty)이 없을 경우 데이터 비교 연산 비용을 0으로 최적화 | `CrowdBubble.cpp` |
 | 복제 | 데이터 정밀도 축소(**데이터 경량화/양자화**) 및 200m 격자 기준 **좌표 재설정**(Origin Rebasing) | agent당 **10 B** (기존 52 B 대비 −81%) | `CrowdNetMath.h` |
-| 복제 | **Dead reckoning** (거리별 허용 오차) | 등속 직진 agent는 재전송 0. 시뮬레이션 테스트가 기존 대비 메시지 **15% 미만**을 assert | `CrowdNetMath.h`, `CrowdTests.cpp` |
-| 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교. Network Insights에서 두 경로 모두 클라이언트로 `AgentArray`가 복제되는 것을 확인했고, Iris 경로는 `AgentArray` 전체가 전송됨 (변경분만 보내는 legacy와 차이, 6장) | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
+| 복제 | **Dead reckoning** (거리별 허용 오차) | 등속 직진 운동을 하는 에이전트는 네트워크 재전송 횟수 0회를 보장, 데드 레코닝 활성화 시 총 메시지 송신량이 기존 대비 **15% 미만**으로 감소 | `CrowdNetMath.h`, `CrowdTests.cpp` |
+| 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교. Network Insights에서 두 경로 모두 클라이언트로 `AgentArray`가 복제되는 것을 확인 | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
 | 클라이언트 | 외삽 + 지수 보간 + **ISM 1개 batch update** | 400 agent = Actor 1 / Render State 및 Draw Call 최적화 | `CrowdRenderSubsystem.cpp` |
 | 빌드 | **`ClientOnly` 모듈 분리** | 서버 타깃에 렌더 모듈이 포함되지 않음 | `MassBubble*.Target.cs` |
 | 검증 | CVar 킬스위치, stat / CSV / Insights 통합 계측, **Hitch 로그**, Automation Test 4종 | 최적화를 측정하고 성능 검증, Hitch는 원인별로 구분 | `CrowdSettings.cpp`, `MassBubbleStats.h`, `MassBubbleStreamingMonitor.cpp`, `CrowdTests.cpp` |
@@ -123,8 +121,8 @@ sequenceDiagram
 | `UCrowdDirector`, `UCrowdSubsystem` | Game thread | Entity create/destroy 같은 structural change는 Mass 처리 중에는 불가 → `IsProcessing()` 확인 후 실행 |
 | `UMassBubbleStreamingMonitor` | Game thread (tickable world subsystem) | 레벨 스트리밍 상태 변경 · GC delegate가 game thread에서 호출됨. `UCrowdSubsystem`이 같은 thread에서 `IsBusy()`를 읽으므로 lock 불필요 |
 | `UCrowdLODProcessor` | Game thread (`bRequiresGameThreadExecution`) | Game-thread-only 서브시스템(뷰어 목록)에 접근 |
-| `UCrowdMovementProcessor` | Worker threads (`ParallelForEachEntityChunk`) | 자기 chunk 데이터만 write, 설정은 불변 POD(Plain Old Data, 구조체) 스냅샷으로 read |
-| `UCrowdSnapshotProcessor` | Game thread | 서브시스템이 소유한 region grid에 write |
+| `UCrowdMovementProcessor` | Worker threads (`ParallelForEachEntityChunk`) | 자기 chunk 데이터만 쓰기, 설정은 불변 POD(Plain Old Data, 구조체) 스냅샷으로 읽기 |
+| `UCrowdSnapshotProcessor` | Game thread | 서브시스템이 소유한 region grid에 쓰기 |
 | `ACrowdBubble::Tick` | Game thread, `TG_PostPhysics` | PrePhysics Mass phase가 만든 스냅샷을 같은 프레임에 소비 |
 | `UCrowdRenderSubsystem::Tick` | Client game thread | ISM transform 갱신 |
 
@@ -132,7 +130,7 @@ sequenceDiagram
 
 - **서버만 원본 상태를 소유** : Mass entity는 서버 / standalone에서만 존재합니다 (`ExecutionFlags`, `ShouldCreateSubsystem`). 클라이언트는 양자화된 AOI 뷰만 가집니다.
 - **액터 외부 상태 분리** : NPC 상태의 소유자는 Actor가 아니라 Region(서버 서브시스템)입니다. World Partition 셀 스트리밍과 생명주기가 분리됩니다.
-- **고부하 작업은 스트리밍 유후(Idle) 시점으로** : World Partition 셀이 로드 / 제거되는 동안에는 NPC spawn / despawn 예산을 줄이고, 셀 언로드 후 GC는 고부하 셀이 없어질 때 실행합니다. 서버의 한 프레임 지연은 모든 플레이어의 지연입니다.
+- **고부하 작업은 스트리밍 유휴(Idle) 시점으로** : World Partition 셀이 로드 / 제거되는 동안에는 NPC spawn / despawn 예산을 줄이고, 셀 언로드 후 GC는 고부하 셀이 없어질 때 실행합니다. 서버의 한 프레임 지연은 모든 플레이어의 지연입니다.
 - **최적화 항목마다 비활성화 수단(킬 스위치) 구현** : A/B 측정이 가능해야 최적화를 증명할 수 있습니다.
 - **순수 로직은 헤더 온리(Header-Only)로 구현** : `CrowdMath.h`, `CrowdCellGrid.h`, `CrowdNetMath.h`는 월드 · Mass · 네트워크 없이 단위 테스트됩니다.
 - **유효하지 않은 상태는 설계 단계에서 원천 차단** : 설정값을 불변식에 맞게 clamp 합니다 (예: bubble 반경은 int16 안전 범위 이하).
@@ -186,43 +184,43 @@ struct FCrowdLODFragment : FMassFragment   //  8 B
 
 | 성능 평가 항목 | 측정 수치 및 명세 | 최적화 성과 및 기술적 의의 |
 | :--- | :--- | :--- |
-| **단일 아키타입 구성** | `0xFFC5A8E9` (1개로 통합) | LOD 단계를 Tag가 아닌 Fragment 값으로 설계하여 상태 변화 시 발생하는 **동적 아키타입 이사 연산(Structural Change)을 원천 차단**했습니다. |
+| **단일 아키타입 구성** | `0xFFC5A8E9` (1개로 통합) | LOD 단계를 Tag가 아닌 Fragment 값으로 설계하여 상태 변화 시 발생하는 **동적 아키타입 이동 연산(Structural Change)을 원천 차단**했습니다. |
 | **개체당 메모리 최적화** | **64 B** (Fragment 56B + Handle 8B) | 에이전트 정보를 64바이트 선형 구조로 압축하여 CPU 캐시 라인 친화적인 메모리 배치를 완성했습니다. |
 | **청크 점유율 (Occupancy)** | **99.2%** (평균 2,030.8 / 최대 2,047 Entity) | 128 KiB 크기의 청크(Chunk) 13개에 개체들을 빈틈없이 조밀하게 배치했습니다. |
 | **메모리 파편화 낭비율** | **단 0.637%** (약 14 KiB) | 일반적인 객체 지향 방식과 달리, 데이터 선형 배치를 통해 **메모리 낭비를 0%대에 가깝게 극한으로 억제**했습니다. |
-| **공간 복잡도 성능** | 구축: `O(N + cells)` / 질의: `O(방문 셀 + 에이전트)` | 복잡도를 최소화하고, 내부 배열을 `Reset()` 및 `EAllowShrinking::No`로 재사용하여 **웜업(Warm-up) 이후 런타임 메모리 추가 할당 0회**를 달성했습니다. |
+| **공간 복잡도 성능** | 구축: `O(N + cells)` / 질의: `O(방문 셀 + 에이전트)` | 복잡도를 최소화하고, 내부 배열을 `Reset()` 및 `EAllowShrinking::No`로 재사용하여 **초기 실행 이후 런타임 메모리 추가 할당 **이 없습니다. |
 | **네트워크 데이터 절감** | 개체당 데이터 **10B 압축** | 데이터 양자화 및 좌표 재설정(Origin Rebasing)을 통해 **기존 방식 대비 네트워크 송수신량을 약 81% 절감**했습니다. |
 
 에디터 PIE에서 Mass가 위 구성대로 동작하는지 Mass Debugger로 확인한 캡처입니다. 구성 확인용이며 성능 벤치마크가 아닙니다.
 
 <p align="center">
-  <img src="Image/MassDebugger_Archetypes.PNG" alt="Mass Debugger - Archetypes" width="640"><br>
+  <img src="Image/MassDebugger_Archetypes.PNG" alt="Mass Debugger - Archetypes" width="781"><br>
   <sub>Mass Debugger › Archetypes — <code>0xFFC5A8E9</code></sub>
 </p>
 
 <p align="center">
-  <img src="Image/MassDebugger_Fragments.PNG" alt="Mass Debugger - Fragments" width="560"><br>
+  <img src="Image/MassDebugger_Fragments.PNG" alt="Mass Debugger - Fragments" width="662"><br>
   <sub>Mass Debugger › Fragments</sub>
 </p>
 
 - **fragment 4종이 같은 entity 집합에 부착** : `Crowd Id` · `Location` · `Motion` · `LOD` Fragment 모두 Archetype 1개 / Entity 26,400개로 표시됩니다 (목록에 같은 행이 반복해서 나타나지만 값은 모두 같습니다).
 
 <p align="center">
-  <img src="Image/MassDebugger_Entities.PNG" alt="Mass Debugger - Entities" width="560"><br>
+  <img src="Image/MassDebugger_Entities.PNG" alt="Mass Debugger - Entities" width="776"><br>
   <sub>Mass Debugger › Entities</sub>
 </p>
 
 - **Entity 핸들** : Entities 탭의 핸들(`i`: index, `sn`: serial number)로 agent가 실제 entity로 생성되어 있음을 확인할 수 있습니다.
 
 <p align="center">
-  <img src="Image/MassDebugger_Processors.PNG" alt="Mass Debugger - Processors" width="640"><br>
+  <img src="Image/MassDebugger_Processors.PNG" alt="Mass Debugger - Processors" width="785"><br>
   <sub>Mass Debugger › Processors</sub>
 </p>
 
 - **프로세서 등록** : `CrowdLODProcessor_0` · `CrowdMovementProcessor_0` · `CrowdSnapshotProcessor_0`가 *Phase-executed processors*에 등록되어 있습니다 (Observer가 아님). 같은 목록의 SmartObject · DebugVis · EnvQuery 계열은 엔진 / 플러그인 기본 프로세서입니다.
 
 <p align="center">
-  <img src="Image/MassDebugger_Processing_Graph.PNG" alt="Mass Debugger - Process Graphs (Pre Physics Group)" width="640"><br>
+  <img src="Image/MassDebugger_Processing_Graph.PNG" alt="Mass Debugger - Process Graphs (Pre Physics Group)" width="697"><br>
   <sub>Mass Debugger › Process Graphs › Pre Physics Group</sub>
 </p>
 
@@ -251,7 +249,7 @@ if (!EntityManager->IsProcessing())
 	PumpRegionJobs();
 }
 
-// PumpRegionJobs: 개수가 아니라 wall-clock 시간으로 제한합니다. (요약)
+// PumpRegionJobs: 개수가 아니라 실제 시간으로 제한합니다. (요약)
 const bool bBudgeted = CrowdCVars::BudgetedPump != 0;                          // 0 = 이전 고정 개수 방식 (A/B)
 const bool bStreamingBusy = Monitor.IsValid() && Monitor->IsBusy();            // WP가 셀을 로드 / 추가 / 제거 중인가
 const double BudgetMs = bStreamingBusy ? T.SpawnBudgetBusyMs : T.SpawnBudgetMs; // 0.25 ms : 1.0 ms
@@ -285,7 +283,7 @@ while (Budget > 0 && SpawnQueue.Num() > 0)
 - **스트리밍 대상 연산** : 각 뷰어(플레이어 및 가상 뷰어) 주변 체비쇼프(Chebyshev) 반경을 중심으로 `ActiveRegionRadius`(기본 2 → 5×5)를 **4 Hz** 주기로 활성화 대상을 실시간으로 관리합니다.
 - **우선순위** : 새로 활성화할 region은 가장 가까운 뷰어 기준 오름차순으로 처리해 플레이어 주변부터 채웁니다.
 - **비활성화 유예 (Hysteresis 완충 처리)** : 더 이상 필요 없는 region은 `RegionDeactivateDelaySec`(10초) 동안 유지한 뒤 despawn 처리합니다. 이를 통해 영역 경계를 반복해서 오가는 플레이어로 인해 발생하는 불필요한 Spawn/Despawn 처리를 방지합니다.
-- **wall-clock 예산 기반 타임슬라이싱 (Time-slicing)** : 개수가 아니라 **시간**으로 제한합니다. `StructuralBatchSize`(64)개씩 `BatchCreateEntities` / `BatchDestroyEntities`를 호출하고 매 batch 뒤에 시계를 확인해, `SpawnBudgetMs` / `DespawnBudgetMs`(각 1.0 ms)를 넘으면 다음 프레임으로 넘깁니다. 프레임당 최소 1 batch는 항상 진행하므로 대기열이 멈추지 않고, `MaxSpawnPerFrame`(500) / `MaxDespawnPerFrame`(1,000)은 하드 캡으로 남습니다.
+- **시간 예산 기반 타임슬라이싱 (Time-slicing)** : 개수가 아니라 **시간**으로 제한합니다. `StructuralBatchSize`(64)개씩 `BatchCreateEntities` / `BatchDestroyEntities`를 호출하고 매 batch 뒤에 시계를 확인해, `SpawnBudgetMs` / `DespawnBudgetMs`(각 1.0 ms)를 넘으면 다음 프레임으로 넘깁니다. 프레임당 최소 1 batch는 항상 진행하므로 대기열이 멈추지 않고, `MaxSpawnPerFrame`(500) / `MaxDespawnPerFrame`(1,000)은 하드 캡으로 남습니다.
 - **스트리밍 연동 예산** : `UMassBubbleStreamingMonitor`가 World Partition 셀의 로딩 / AddToWorld / RemoveFromWorld를 감지하는 동안(`IsBusy()`)에는 예산이 `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs`(각 0.25 ms)로 줄어듭니다. 엔진이 이미 프레임을 쓰는 구간에 NPC 구조 변경까지 얹지 않기 위해서입니다.
 - **A/B** : `opt.crowd.BudgetedPump 0`이면 이전 방식(프레임당 고정 500 / 1,000개, 시계 확인 없음)으로 돌아가 스트리밍 Hitch를 재현할 수 있습니다.
 - **결정론적 복원** : despawn 시 `FCrowdSavedAgent`(NetId, 위치, 속도, retarget timer, RNG state)를 저장하고 재활성화 때 그대로 복원합니다. 최초 생성은 `Seed = Hash32(regionCoordHash ^ WorldSeed)`와 agent별 xorshift32로 재현 가능합니다.
@@ -380,11 +378,11 @@ else
 - **Thread-safety 근거** — (1) chunk-local write만 수행, (2) 설정은 UObject가 아니라 불변 POD 스냅샷 `FCrowdTuning`에서 읽음, (3) RNG state가 agent별 fragment 안에 있어 공유 난수 생성기가 없음, (4) 통계 카운터는 chunk 단위로 모아 atomic 1회.
 - `UCrowdSubsystem`은 `TMassExternalSubsystemTraits`에서 `GameThreadOnly = true`로 선언해, 이 서브시스템을 요구하는 프로세서(LOD, Snapshot)가 game thread에서만 접근하도록 명시합니다.
 
-#### 에디터 검증 — Unreal Insights (PIE)
+#### 에디터 검증 — Unreal Insights
 
 <p align="center">
   <img src="Image/UnrealInsight_MassProcessor.PNG" alt="Unreal Insights - Mass processors" width="1000"><br>
-  <sub>Unreal Insights › Timing Insights — 타이머 필터 <code>crowd</code> (Editor · Development, 한 프레임 확대)</sub>
+  <sub>Unreal Insights › Timing Insights — 타이머 필터 <code>crowd</code></sub>
 </p>
 
 - **스레드 배치** : `CrowdLODProcessor_0`(≈ 141 µs)와 `CrowdSnapshotProcessor_0`(≈ 485 µs, snapshot이 실행된 프레임)는 Game Thread의 `MassProcessingQueue Main-Thread Runner Task` 안에서, `CrowdMovementProcessor`(`Opt.Crowd.Move` ≈ 75 µs)는 `Foreground Worker #0`의 `Mass Processor Worker Task`에서 실행됩니다. [스레딩 모델](#스레딩-모델) 표의 배치(LOD · Snapshot = game thread, Movement = worker)와 같습니다.
@@ -816,12 +814,12 @@ if (bRegisterAsCrowdViewer)
 
 ### 12. World Partition 로딩 / 언로딩 최적화
 
-#### ⚠️ 문제 상황
+#### 문제 상황
 * World Partition 셀 로드/언로드 시 컴포넌트 등록·해제 및 엔진 강제 GC 발생하게 됩니다.
 * 데디케이티드 서버의 프레임이 지연되면 **접속 중인 모든 플레이어의 틱이 동반 지연**됩니다.
 * 이 타이밍에 대규모 NPC Spawn / Despawn이 겹칠 경우 극심한 프레임 드랍(Hitch) 유발하게 됩니다.
 
-#### 🛠️ 최적화 내역
+#### 최적화 내역
 * **엔진 작업 분산:** 단일 프레임에 집중되던 엔진 부하 작업을 여러 프레임으로 분산 처리합니다.
 * **고부하 작업 이연:** **고부하 작업(GC 및 구조 변경)**을 스트리밍 유휴(Idle) 시점으로 스케줄링 이연합니다.
 * **원인 식별 정교화:** 잔여 성능 저하(Hitch) 발생 시, **로그 분류**를 통해 병목 원인을 명확히 추적 및 식별할 수 있도록 합니다.
@@ -973,8 +971,8 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 
 | 도구 | 사용법 | 볼 수 있는 것 |
 |---|---|---|
-| Stat | 서버 `stat OptCrowd` · 클라이언트 `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble cycle, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` (화면 예시: 아래) |
-| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*`, `Opt.Render.Update` 스코프, Networking Insights (패킷별 `CrowdBubble` / `AgentArray` 비트 수, Iris · legacy 복제 경로 구분 — 6장 캡처) |
+| Stat | 서버 `stat OptCrowd` · 클라이언트 `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble cycle, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` [stat-화면-예시](#stat-화면-예시--stat-optcrowd--stat-optrender) |
+| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*`, `Opt.Render.Update` 스코프, Networking Insights (패킷별 `CrowdBubble` / `AgentArray` 비트 수, Iris · legacy 복제 경로 구분 [network-insights-검증-분석](#network-insights-검증-분석)) |
 | CSV Profiler | `csvprofile start` / `csvprofile stop` | 카테고리 `OptCrowd`(`StreamingBusyCells` 포함), `OptRender` (Test 빌드에서도 동작) |
 | 로그 | `opt.crowd.Stats` | region 상태별 개수, LOD tier 분포, viewer 수, spawn/despawn 큐 길이, snapshot region 수, 대기 중인 봇 작업, WP busy 셀 · 마지막 GC 요약, 현재 스위치 값 |
 | Hitch 로그 | `opt.hitch.LogMs <ms>` | 임계값을 넘긴 프레임마다 GC(소요 · 간격 · 시작 주체) · WP 셀 활동 · crowd 상태 |
@@ -1007,7 +1005,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 | `opt.crowd.Replicate` | 1 | `0` = snapshot / bubble 갱신 정지 → **시뮬레이션 비용만 분리** |
 | `opt.crowd.DeadReckoning` | 1 | `0` = 움직이는 agent를 매 tick 재전송 → 대역폭 · 직렬화 비용 |
 | `opt.crowd.ReplicationHz` | 0 | `> 0`이면 프로젝트 설정의 Replication Hz를 덮어씀 |
-| `opt.crowd.BudgetedPump` | 1 | `0` = spawn / despawn을 프레임당 고정 개수로 처리 (wall-clock 예산 없음) → **스트리밍 Hitch 재현** |
+| `opt.crowd.BudgetedPump` | 1 | `0` = spawn / despawn을 프레임당 고정 개수로 처리 (시간 예산 없음) → **스트리밍 Hitch 재현** |
 | `opt.crowd.SnapshotScope` | 1 | `0` = 모든 live region을 snapshot (이전 동작) → snapshot 범위 효과 |
 | `opt.crowd.BotRampSec` | -1 | 봇 생성 / 제거 간격(초). `0` = 한 프레임에 전부 (burst), `< 0` = 프로젝트 설정(`BotRampIntervalSec`) |
 | `opt.crowd.BotActivateCells` | 1 | 이후 생성되는 봇이 셀을 `1` = Activated (플레이어처럼 BeginPlay · 등록 · tick), `0` = Loaded까지만 (가벼운 부하) |
@@ -1153,9 +1151,9 @@ TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), 
 ### 요구 사항
 
 - **Unreal Engine 5.8** : `MassBubbleServer` / `MassBubbleClient` 타깃은 **소스 빌드 엔진**이 필요합니다.
-- Mass 모듈 : `MassEntity`, `MassCommon`, `MassSimulation`, 그리고 5.8에서 추가된 `MassCore`. UE 5.7 이하에서 빌드하려면 `MassBubble.Build.cs`의 `MassCore` 의존성을 제거하세요.
+- Mass 모듈 : `MassEntity`, `MassCommon`, `MassSimulation`, 그리고 5.8에서 추가된 `MassCore`.
 - **Push Model 활성** : `[SystemSettings] net.IsPushModelEnabled=1`. 꺼져 있으면 dirty 마킹이 효과가 없고 프로퍼티가 일반 경로로 비교됩니다.
-- (선택) **Iris** : `-UseIrisReplication=1`(또는 `net.Iris.UseIrisReplication`)로 켭니다. Iris는 `net.SubObjects.DefaultUseSubObjectReplicationList=1`이 필요하며, `opt.net.Info`가 현재 설정을 로그로 보여 줍니다.
+- **Iris** : `-UseIrisReplication=1`(또는 `net.Iris.UseIrisReplication`)로 켭니다. Iris는 `net.SubObjects.DefaultUseSubObjectReplicationList=1`이 필요하며, `opt.net.Info`가 현재 설정을 로그로 보여 줍니다.
 - World Partition 맵 + 서버 스트리밍 `wp.Runtime.EnableServerStreaming=1`.
 
 ### 빌드
@@ -1203,7 +1201,7 @@ UnrealEditor-Cmd MassBubble.uproject -ExecCmds="Automation RunTests MassBubble.C
 | | `ActiveRegionRadius` | 2 | 뷰어 주변 활성 region 반경 (Chebyshev) → 5×5 |
 | | `AgentsPerRegion` | 400 | Region당 agent 수 |
 | | `RegionDeactivateDelaySec` | 10 | despawn 유예 (경계 flicker 방어) |
-| | `MaxSpawnPerFrame` / `MaxDespawnPerFrame` | 500 / 1000 | 프레임당 spawn / despawn 하드 캡 (실제 제한은 아래 Streaming의 wall-clock 예산) |
+| | `MaxSpawnPerFrame` / `MaxDespawnPerFrame` | 500 / 1000 | 프레임당 spawn / despawn 하드 캡 (실제 제한은 아래 Streaming의 시간 예산) |
 | LOD | `High` / `Medium` / `LowLODDistanceCm` | 4000 / 10000 / 20000 | tier 경계 (40 / 100 / 200 m) |
 | | `LODHysteresisCm` | 500 | tier 전환 hysteresis |
 | | `High` / `Medium` / `Low` / `OffIntervalFrames` | 1 / 2 / 6 / 0 | 시뮬레이션 주기 (0 = 동결) |
@@ -1217,7 +1215,7 @@ UnrealEditor-Cmd MassBubble.uproject -ExecCmds="Automation RunTests MassBubble.C
 | | `NearDistanceCm` | 3000 | near / far 경계 |
 | | `VelocityEpsCmPerSec` | 25 | 속도 변화 재전송 임계 |
 | | `GridCellSizeCm` | 1600 | 공간 격자 셀 크기 |
-| Streaming | `SpawnBudgetMs` / `DespawnBudgetMs` | 1.0 / 1.0 | 프레임당 wall-clock 예산 (ms). batch마다 시계를 확인하며 프레임당 최소 1 batch는 진행 |
+| Streaming | `SpawnBudgetMs` / `DespawnBudgetMs` | 1.0 / 1.0 | 프레임당 시간 예산 (ms). batch마다 시계를 확인하며 프레임당 최소 1 batch는 진행 |
 | | `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs` | 0.25 / 0.25 | World Partition 셀이 로딩 / 추가 / 제거 중일 때의 예산 (0 허용, 일반 예산 이하로 clamp) |
 | | `StructuralBatchSize` | 64 | `BatchCreateEntities` / `BatchDestroyEntities` 1회당 agent 수 (8–2048) |
 | | `SnapshotMarginCm` | 2000 | snapshot 범위를 실제 플레이어 bubble 반경 바깥으로 넓히는 여유 |
