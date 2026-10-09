@@ -1,5 +1,6 @@
 #include "Crowd/CrowdSettings.h"
 
+#include "Crowd/CrowdWander.h"
 #include "Net/CrowdNetMath.h"
 
 #include "HAL/IConsoleManager.h"
@@ -74,6 +75,21 @@ namespace
 	FCrowdTuning GCrowdTuning;
 	bool GCrowdTuningReady = false;
 
+	/**
+	 * The band along a region border (CrowdWander::LayerDepthCm) must stay well inside the region: a slow turn rate with
+	 * a small region would leave no open ground. Raises the turn rate until the band plus margin is at most 30 % of the
+	 * region on each side. Called again after the geometry of the previous snapshot has been restored.
+	 */
+	void ClampWallTurnToRegion(FCrowdTuning& Out)
+	{
+		const float RoomCm = 0.3f * Out.RegionSizeCm - static_cast<float>(CrowdWander::WallMarginCm) - CrowdWander::LayerSlackCm;
+		if (RoomCm > 1.f)
+		{
+			const float MinRateDeg = FMath::RadiansToDegrees(2.f * Out.MaxSpeedCmPerSec / RoomCm);
+			Out.WallTurnRateDeg = FMath::Max(Out.WallTurnRateDeg, MinRateDeg);
+		}
+	}
+
 	void BuildTuning(const UCrowdSettings& S, FCrowdTuning& Out)
 	{
 		Out.RegionSizeCm = FMath::Max(S.RegionSizeCm, 1600.f);
@@ -96,8 +112,14 @@ namespace
 
 		Out.MinSpeedCmPerSec = FMath::Max(S.MinSpeedCmPerSec, 1.f);
 		Out.MaxSpeedCmPerSec = FMath::Max(S.MaxSpeedCmPerSec, Out.MinSpeedCmPerSec);
+		Out.SpeedVariation = FMath::Clamp(S.SpeedVariation, 0.f, 0.5f);
 		Out.MinRetargetSec = FMath::Max(S.MinRetargetSec, 0.1f);
 		Out.MaxRetargetSec = FMath::Max(S.MaxRetargetSec, Out.MinRetargetSec);
+		Out.MaxTurnDeg = FMath::Clamp(S.MaxTurnDeg, 0.f, 180.f);
+		Out.WallTurnRateDeg = FMath::Clamp(S.WallTurnRateDeg, 10.f, 360.f);
+		Out.IdleChance = FMath::Clamp(S.IdleChance, 0.f, 0.95f);
+		Out.MinIdleSec = FMath::Max(S.MinIdleSec, CrowdWander::MinSegmentSec); // the planner's shortest segment, see Advance()
+		Out.MaxIdleSec = FMath::Max(S.MaxIdleSec, Out.MinIdleSec);
 		Out.AgentGroundZ = S.AgentGroundZ;
 		Out.MaxStepDeltaSec = FMath::Max(S.MaxStepDeltaSec, 0.05f);
 
@@ -113,6 +135,7 @@ namespace
 		Out.GridCellSizeCm = FMath::Max(S.GridCellSizeCm, 400.f);
 
 		Out.CellsPerSide = FMath::Max(1, FMath::CeilToInt(Out.RegionSizeCm / Out.GridCellSizeCm));
+		ClampWallTurnToRegion(Out);
 
 		// Streaming / hitch protection. The "busy" budgets may be 0: one batch per frame is always created / destroyed.
 		Out.SpawnBudgetMs = FMath::Max(S.SpawnBudgetMs, 0.05f);
@@ -140,6 +163,7 @@ void ReloadCrowdTuning(bool bKeepGeometry)
 		GCrowdTuning.RegionSizeCm = Previous.RegionSizeCm;
 		GCrowdTuning.GridCellSizeCm = Previous.GridCellSizeCm;
 		GCrowdTuning.CellsPerSide = Previous.CellsPerSide;
+		ClampWallTurnToRegion(GCrowdTuning);
 	}
 	GCrowdTuningReady = true;
 }

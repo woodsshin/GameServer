@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/StreamableManager.h"
+#include "Net/CrowdSmoothing.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "CrowdRenderSubsystem.generated.h"
 
@@ -15,8 +16,10 @@ class UInstancedStaticMeshComponent;
  *
  * The server owns the truth (Mass entities); the client only ever sees ACrowdBubble's quantized FastArray.
  * Every frame this subsystem
- *   1. extrapolates each received agent with its velocity (dead reckoning, client half),
- *   2. smooths towards that position (hides correction pops),
+ *   1. extrapolates each received agent with its velocity (dead reckoning, client half; the cap is the shared one in
+ *      CrowdNet, so the server knows exactly what is drawn),
+ *   2. smooths (CrowdSmoothing: eased velocity + velocity feed-forward + position correction + yaw) so that new walking
+ *      segments become curves and corrections never show as jumps,
  *   3. writes all transforms into ONE instanced static mesh with a single batch call.
  *
  * It exists only where there is a screen: the module is ClientOnly and ShouldCreateSubsystem also rejects
@@ -58,10 +61,10 @@ private:
 	TArray<FTransform> Transforms;
 	TArray<FTransform> AddScratch;
 
-	/** Smoothed on-screen position per NetId. */
+	/** What is drawn for one agent (position, eased velocity, yaw), per NetId. */
 	struct FVisual
 	{
-		FVector2D Pos = FVector2D::ZeroVector;
+		CrowdSmoothing::FState State;
 		uint32 Epoch = 0;
 	};
 	TMap<uint32, FVisual> Visuals;

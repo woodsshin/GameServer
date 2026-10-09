@@ -83,9 +83,17 @@ struct MASSBUBBLE_API FCrowdAgentItem : public FFastArraySerializerItem
 		}
 	}
 
-	/** Client side view of the agent: last received state plus velocity * elapsed (capped). */
-	FVector2D GetExtrapolatedPosition(const FVector2D& OriginWorld, double Now, double MaxExtrapolationSec) const;
+	/**
+	 * Client side view of the agent, before cosmetic smoothing: the last received state plus velocity * elapsed, capped
+	 * at CrowdNet::MaxExtrapolationSec. This is the very function the server uses to predict what the client sees.
+	 */
+	FVector2D GetExtrapolatedPosition(const FVector2D& OriginWorld, double Now) const;
+
+	/** The replicated velocity (5 cm/s units dequantized). */
 	FVector2f GetVelocity() const;
+
+	/** The velocity to dead reckon with: the replicated one while extrapolation is allowed, zero once the cap has run out. */
+	FVector2f GetDrivingVelocity(double Now) const;
 };
 
 /**
@@ -122,7 +130,7 @@ struct TStructOpsTypeTraits<FCrowdAgentArray> : public TStructOpsTypeTraitsBase2
  *   * only relevant to its owner               (bOnlyRelevantToOwner + COND_OwnerOnly)
  *   * push model driven                        (compared only when marked dirty)
  *   * a FastArray of 10 byte quantized records (only changed records are sent)
- *   * filtered by dead reckoning               (an agent walking straight sends nothing)
+ *   * filtered by dead reckoning               (a straight walker is only re-sent every CrowdNet::HeartbeatSec)
  *
  * Created by AMassBubbleGameMode on login, destroyed on logout.
  */
@@ -159,6 +167,8 @@ private:
 	{
 		FCrowdGridAgent Agent;
 		double DistSq = 0.0;
+		double Rank = 0.0;                  // sort key: DistSq, with a head start for agents the client already has
+		int32 ExistingIndex = INDEX_NONE;   // index into AgentArray.Items if the client already has this agent
 	};
 
 	TArray<FCandidate> Candidates;

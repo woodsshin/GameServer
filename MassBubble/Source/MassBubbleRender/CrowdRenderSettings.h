@@ -42,16 +42,27 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "1", ClampMax = "20000"))
 	int32 MaxInstances = 2048;
 
-	/** Never extrapolate further than this past the last received state (a stalled connection must not fling agents away). */
-	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "0.1", ClampMax = "5.0"))
-	float MaxExtrapolationSec = 1.5f;
-
 	/**
-	 * Exponential smoothing rate (1/s) towards the extrapolated position. Hides the pops caused by dead-reckoning
-	 * corrections. 0 disables it (agents snap). Costs a TMap lookup per agent per frame.
+	 * The three rates below belong to the client-side smoothing (Net/CrowdSmoothing.h). The replicated state is a
+	 * position and a constant velocity per walking segment; drawn as it is, every segment would be a corner. All rates
+	 * are in 1/s (the time constant is 1/rate); 0 turns the respective filter off.
+	 *
+	 * How fast the drawn velocity follows the replicated one: a turn becomes a short curve, a pause a short slide.
 	 */
 	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "0.0", ClampMax = "60.0"))
-	float SmoothingRate = 15.f;
+	float VelocityEasingRate = 7.f;
+
+	/** How fast the drawn position is pulled onto the position the server predicts. This is what keeps the error bounded. */
+	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "0.0", ClampMax = "60.0"))
+	float CorrectionRate = 4.f;
+
+	/** How fast the agent turns to face the direction it walks in. */
+	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "0.0", ClampMax = "60.0"))
+	float YawRate = 10.f;
+
+	/** Farther than this from where it should be (cm): teleport instead of gliding (first sighting, a long gap in the data). */
+	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "50"))
+	float SnapDistanceCm = 500.f;
 
 	/** How often the client looks for its replicated ACrowdBubble while it has none. */
 	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "0.1"))

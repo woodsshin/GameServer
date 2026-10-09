@@ -27,6 +27,8 @@ struct FCrowdSavedAgent
 	FVector2f Velocity = FVector2f::ZeroVector;
 	float RetargetTimer = 0.f;
 	uint32 Rng = 1;
+	float Heading = 0.f;      // radians, direction of the last walking segment
+	float CruiseSpeed = 0.f;  // cm/s, the agent's own preferred walking speed
 };
 
 /** Plain-old-data snapshot of the settings. Read by processors (possibly off the game thread). */
@@ -46,11 +48,17 @@ struct FCrowdTuning
 	float LODHysteresisCm = 500.f;
 	int32 LODIntervalFrames[CrowdLODCount] = { 1, 2, 6, 0 }; // simulate every N frames, 0 = frozen
 
-	// --- Movement ---
-	float MinSpeedCmPerSec = 80.f;
-	float MaxSpeedCmPerSec = 220.f;
-	float MinRetargetSec = 2.f;
-	float MaxRetargetSec = 6.f;
+	// --- Movement (see Crowd/CrowdWander.h) ---
+	float MinSpeedCmPerSec = 90.f;         // range of the agents' own cruise speeds
+	float MaxSpeedCmPerSec = 180.f;
+	float SpeedVariation = 0.15f;          // +-15 % around the cruise speed, per walking segment
+	float MinRetargetSec = 1.5f;           // length of a walking segment
+	float MaxRetargetSec = 3.5f;
+	float MaxTurnDeg = 60.f;               // largest heading change between two walking segments
+	float WallTurnRateDeg = 60.f;          // deg/s: how fast agents bend away inside the band along the region border
+	float IdleChance = 0.12f;              // chance that an average walking segment turns into a pause (per mean segment length)
+	float MinIdleSec = 1.5f;
+	float MaxIdleSec = 5.f;
 	float AgentGroundZ = 0.f;
 	float MaxStepDeltaSec = 0.5f;
 

@@ -538,7 +538,7 @@ if (bStructural || NumDirty > 0)
 
 #### Iris / Legacy 복제 겸용 설계
 
-`FCrowdAgentArray`는 표준 `FFastArraySerializer`라서 legacy NetDriver(`NetDeltaSerialize`)와 Iris(기존 FastArray 정의 지원) **양쪽에서 동작**하며, 같은 빌드를 `-UseIrisReplication=0 / 1`로 바꿔 가며 비교할 수 있습니다. 두 시스템의 동작 차이 때문에 다음 처리가 들어 있습니다.
+`FCrowdAgentArray`는 표준 `FFastArraySerializer`라서 legacy NetDriver(`NetDeltaSerialize`)와 Iris(기존 FastArray 정의 지원) **양쪽에서 동작**하며, 같은 빌드를 `-UseIrisReplication=0 / 1` 파라미터로 바꿔 가며 비교할 수 있습니다. 두 시스템의 동작 차이 때문에 다음 처리가 들어 있습니다.
 
 ```cpp
 // Net/CrowdBubble.cpp — ServerRebuild: swap-remove 이후 (요약)
@@ -567,7 +567,7 @@ if (bFirstTime || NetId != AppliedNetId || X != AppliedX || Y != AppliedY || VX 
 
 #### Network Insights 검증 분석
 
-`-UseIrisReplication=1`(Iris)과 `-UseIrisReplication=0`(Legacy FastArray) 두 경로 모두에서 `ACrowdBubble`의 `AgentArray`가 클라이언트로 정상 복제되는 것을 확인했습니다. 두 캡처는 서로 다른 실행 환경에서 추출한 패킷으로, 대역폭 비교(KB/s 벤치마크)가 아닌 **런타임 직렬화 및 복제 경로 검증**을 목적으로 합니다.
+Iris와 Legacy FastArray 모두에서 `ACrowdBubble`의 `AgentArray`가 클라이언트로 정상 복제되는 것을 확인했습니다. 두 캡처는 서로 다른 실행 환경에서 추출한 패킷으로, 대역폭 비교(KB/s 벤치마크)가 아닌 **런타임 직렬화 및 복제 경로 검증**을 목적으로 합니다.
 
 <p align="center">
   <img src="Image/UnrealInsight_Network_Profiler_Iris_whole_array_replicated_issue.PNG" alt="Network Insights - Iris (-UseIrisReplication=1)" width="1275"><br>

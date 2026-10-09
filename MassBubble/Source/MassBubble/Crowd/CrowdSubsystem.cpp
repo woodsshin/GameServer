@@ -5,6 +5,7 @@
 #include "Crowd/CrowdFragments.h"
 #include "Crowd/CrowdMath.h"
 #include "Crowd/CrowdSettings.h"
+#include "Crowd/CrowdWander.h"
 #include "MassBubble.h"
 #include "World/MassBubbleStreamingAnchor.h"
 
@@ -457,17 +458,15 @@ FCrowdSavedAgent UCrowdSubsystem::MakeAgent(const FCrowdRegion& Region, int32 In
 	}
 
 	const FCrowdTuning& T = GetCrowdTuning();
-	uint32 State = CrowdMath::NonZeroSeed(CrowdMath::Hash32(Region.Seed + static_cast<uint32>(Index) * 2654435761u));
 
 	FCrowdSavedAgent Agent;
 	Agent.NetId = NextNetId++;
+
+	// Position, heading, cruise speed and the first pause are decided by CrowdWander::InitNewAgent (unit tested): new
+	// agents start on open ground, never inside the band along the region border.
 	const FVector2D Min = CrowdMath::RegionMin(Region.Coord, T.RegionSizeCm);
-	const double RX = CrowdMath::Random01(State);
-	const double RY = CrowdMath::Random01(State);
-	Agent.Location = Min + FVector2D(RX, RY) * T.RegionSizeCm;
-	Agent.Velocity = FVector2f::ZeroVector;
-	Agent.RetargetTimer = 0.f; // picks its first heading on the first simulated step
-	Agent.Rng = CrowdMath::NonZeroSeed(State);
+	const CrowdWander::FBox2 Home{ Min, Min + FVector2D(T.RegionSizeCm, T.RegionSizeCm) };
+	CrowdWander::InitNewAgent(Agent, Region.Seed + static_cast<uint32>(Index) * 2654435761u, Home, T);
 	return Agent;
 }
 
@@ -509,6 +508,8 @@ int32 UCrowdSubsystem::SpawnSlice(FCrowdRegion& Region, int32 Budget)
 			Motion.Velocity = Agent.Velocity;
 			Motion.RetargetTimer = Agent.RetargetTimer;
 			Motion.Rng = CrowdMath::NonZeroSeed(Agent.Rng);
+			Motion.Heading = Agent.Heading;
+			Motion.CruiseSpeed = Agent.CruiseSpeed;
 			// FCrowdLODFragment keeps its default (Off) until UCrowdLODProcessor classifies the agent.
 		}
 	}
@@ -550,6 +551,8 @@ int32 UCrowdSubsystem::DespawnSlice(FCrowdRegion& Region, int32 Budget)
 			Saved.Velocity = Motion.Velocity;
 			Saved.RetargetTimer = Motion.RetargetTimer;
 			Saved.Rng = Motion.Rng;
+			Saved.Heading = Motion.Heading;
+			Saved.CruiseSpeed = Motion.CruiseSpeed;
 		}
 
 		// 2) destroy them in one batch

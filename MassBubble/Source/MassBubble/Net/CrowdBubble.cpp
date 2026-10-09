@@ -32,12 +32,15 @@ FVector2f FCrowdAgentItem::GetVelocity() const
 	return FVector2f(CrowdNet::DequantizeVelocity(VX), CrowdNet::DequantizeVelocity(VY));
 }
 
-FVector2D FCrowdAgentItem::GetExtrapolatedPosition(const FVector2D& OriginWorld, double Now, double MaxExtrapolationSec) const
+FVector2D FCrowdAgentItem::GetExtrapolatedPosition(const FVector2D& OriginWorld, double Now) const
 {
-	const double Elapsed = FMath::Clamp(Now - RecvTime, 0.0, MaxExtrapolationSec);
 	const FVector2D Base = OriginWorld + FVector2D(CrowdNet::DequantizeOffset(X), CrowdNet::DequantizeOffset(Y));
-	const FVector2f Vel = GetVelocity();
-	return Base + FVector2D(Vel.X, Vel.Y) * Elapsed;
+	return CrowdNet::Extrapolate(Base, GetVelocity(), Now - RecvTime);
+}
+
+FVector2f FCrowdAgentItem::GetDrivingVelocity(double Now) const
+{
+	return CrowdNet::DrivingVelocity(GetVelocity(), Now - RecvTime);
 }
 
 // =================================================================================================
@@ -175,17 +178,31 @@ void ACrowdBubble::ServerRebuild(UCrowdSubsystem& Crowd)
 	const FVector2D OriginWorld = CrowdNet::LatticeToWorld(OriginLattice);
 
 	// ---- 2) interest set: everything within the radius, nearest MaxAgentsPerBubble ----
+	// With hysteresis (CrowdNet::InterestRank / InterestExitRadius): an agent that is already replicated counts as 10 %
+	// closer and may stay up to 10 % beyond the radius a newcomer has to be inside. An agent that hovers around the
+	// edge of the set otherwise enters and leaves again and again, and each time costs a full record plus a gap in
+	// the client's smoothing (the agent pops out and in).
+	const double EnterRadius = Tuning.BubbleRadiusCm;
 	Candidates.Reset();
-	Crowd.ForEachAgentInCircle(Center, Tuning.BubbleRadiusCm, [this](const FCrowdGridAgent& Agent, double DistSq)
+	Crowd.ForEachAgentInCircle(Center, CrowdNet::InterestExitRadius(EnterRadius), [this, EnterRadius](const FCrowdGridAgent& Agent, double DistSq)
 	{
+		const int32* Existing = IdToIndex.Find(Agent.NetId);
+		double Rank = 0.0;
+		if (!CrowdNet::InterestCandidate(DistSq, Existing != nullptr, EnterRadius, Rank))
+		{
+			return; // a newcomer has to be inside the normal radius
+		}
+
 		FCandidate& Candidate = Candidates.AddDefaulted_GetRef();
 		Candidate.Agent = Agent;
 		Candidate.DistSq = DistSq;
+		Candidate.ExistingIndex = (Existing != nullptr) ? *Existing : INDEX_NONE;
+		Candidate.Rank = Rank;
 	});
 
 	if (Candidates.Num() > Tuning.MaxAgentsPerBubble)
 	{
-		Candidates.Sort([](const FCandidate& L, const FCandidate& R) { return L.DistSq < R.DistSq; });
+		Candidates.Sort([](const FCandidate& L, const FCandidate& R) { return L.Rank < R.Rank; });
 		Candidates.SetNum(Tuning.MaxAgentsPerBubble, EAllowShrinking::No);
 	}
 
@@ -203,8 +220,7 @@ void ACrowdBubble::ServerRebuild(UCrowdSubsystem& Crowd)
 		const FCandidate& Candidate = Candidates[CandidateIndex];
 		const FCrowdGridAgent& Agent = Candidate.Agent;
 
-		const int32* IndexPtr = IdToIndex.Find(Agent.NetId);
-		if (IndexPtr == nullptr)
+		if (Candidate.ExistingIndex == INDEX_NONE)
 		{
 			// entered the interest set
 			const int32 NewIndex = Items.AddDefaulted();
@@ -219,7 +235,7 @@ void ACrowdBubble::ServerRebuild(UCrowdSubsystem& Crowd)
 			continue;
 		}
 
-		FCrowdAgentItem& Item = Items[*IndexPtr];
+		FCrowdAgentItem& Item = Items[Candidate.ExistingIndex]; // still valid: items are only removed in step 4
 		Item.SeenEpoch = Epoch;
 		Item.CandidateIndex = CandidateIndex;
 

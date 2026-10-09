@@ -34,6 +34,12 @@ namespace
 		TEXT("1 = draw the replicated crowd. 0 = hide it (measure network cost without render cost)."),
 		ECVF_Default);
 
+	int32 GRenderSmoothing = 1;
+	FAutoConsoleVariableRef CVarRenderSmoothing(
+		TEXT("opt.crowd.RenderSmoothing"), GRenderSmoothing,
+		TEXT("1 = eased velocity + velocity feed-forward + correction + yaw (CrowdSmoothing). 0 = draw the extrapolated position as it is (A/B comparison)."),
+		ECVF_Default);
+
 	int32 GRenderStats = 0;
 	FAutoConsoleVariableRef CVarRenderStats(
 		TEXT("opt.crowd.RenderStats"), GRenderStats,
@@ -233,10 +239,14 @@ void UCrowdRenderSubsystem::Tick(float DeltaTime)
 	const FVector2D Origin = BubblePtr->GetOriginWorld();
 	const double Z = static_cast<double>(GetCrowdTuning().AgentGroundZ) + Settings->PivotOffsetCm;
 	const FVector Scale = Settings->AgentScale;
-	const double MaxExtrapolation = Settings->MaxExtrapolationSec;
-	const double Alpha = (Settings->SmoothingRate > 0.f)
-		? 1.0 - FMath::Exp(-static_cast<double>(Settings->SmoothingRate) * static_cast<double>(DeltaTime))
-		: 1.0;
+
+	CrowdSmoothing::FParams Params;
+	Params.VelocityRate = Settings->VelocityEasingRate;
+	Params.CorrectionRate = Settings->CorrectionRate;
+	Params.YawRate = Settings->YawRate;
+	Params.SnapDistanceCm = Settings->SnapDistanceCm;
+	const CrowdSmoothing::FFrame Frame = CrowdSmoothing::MakeFrame(Params, DeltaTime); // once per frame, not per agent
+	const bool bSmooth = GRenderSmoothing != 0;
 
 	++VisualEpoch;
 	Transforms.Reset(Count);
@@ -244,36 +254,43 @@ void UCrowdRenderSubsystem::Tick(float DeltaTime)
 	{
 		const FCrowdAgentItem& Item = Items[Index];
 
-		const FVector2D Target = Item.GetExtrapolatedPosition(Origin, Now, MaxExtrapolation);
-		FVector2D Shown = Target;
-		if (Alpha < 1.0)
+		// Where the server believes the client draws this agent, and the velocity to walk it with until the next update.
+		const FVector2D Target = Item.GetExtrapolatedPosition(Origin, Now);
+		const FVector2f TargetVelocity = Item.GetDrivingVelocity(Now);
+
+		FVector2D Shown;
+		double Yaw;
+
+		if (bSmooth)
 		{
-			if (FVisual* Visual = Visuals.Find(Item.NetId))
+			FVisual* Visual = Visuals.Find(Item.NetId);
+			if (Visual == nullptr)
 			{
-				if (Visual->Epoch + 1u == VisualEpoch)
-				{
-					Visual->Pos += (Target - Visual->Pos) * Alpha; // drawn last frame too: glide
-				}
-				else
-				{
-					Visual->Pos = Target; // re-entered the bubble after a gap: do not fly in from the old spot
-				}
-				Visual->Epoch = VisualEpoch;
-				Shown = Visual->Pos;
+				// first sighting: appear exactly where the server says
+				Visual = &Visuals.Add(Item.NetId);
+				Visual->State = CrowdSmoothing::Begin(Target, TargetVelocity, StationaryYawDegrees(Item.NetId));
+			}
+			else if (Visual->Epoch + 1u != VisualEpoch)
+			{
+				// re-entered the bubble after a gap: do not fly in from the old spot (but keep facing the way it faced)
+				Visual->State = CrowdSmoothing::Begin(Target, TargetVelocity, Visual->State.YawDeg);
 			}
 			else
 			{
-				FVisual NewVisual;
-				NewVisual.Pos = Target; // first sighting: appear exactly where the server says
-				NewVisual.Epoch = VisualEpoch;
-				Visuals.Add(Item.NetId, NewVisual);
+				CrowdSmoothing::Step(Visual->State, Target, TargetVelocity, DeltaTime, Frame, Params);
 			}
-		}
+			Visual->Epoch = VisualEpoch;
 
-		const FVector2f Velocity = Item.GetVelocity();
-		const double Yaw = (Velocity.SizeSquared() > 1.f)
-			? FMath::RadiansToDegrees(FMath::Atan2(static_cast<double>(Velocity.Y), static_cast<double>(Velocity.X)))
-			: StationaryYawDegrees(Item.NetId);
+			Shown = Visual->State.Pos;
+			Yaw = Visual->State.YawDeg;
+		}
+		else
+		{
+			Shown = Target;
+			Yaw = (TargetVelocity.SizeSquared() > 1.f)
+				? FMath::RadiansToDegrees(FMath::Atan2(static_cast<double>(TargetVelocity.Y), static_cast<double>(TargetVelocity.X)))
+				: StationaryYawDegrees(Item.NetId);
+		}
 
 		Transforms.Emplace(FRotator(0.0, Yaw, 0.0), FVector(Shown.X, Shown.Y, Z), Scale);
 	}

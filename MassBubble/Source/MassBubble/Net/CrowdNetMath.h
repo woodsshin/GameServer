@@ -15,6 +15,14 @@
  *   * The origin only changes when the player is MORE than RebaseDistanceCm away from it. The lattice half cell is
  *     100 m, so there is 10 m of hysteresis: a player jittering on a lattice border does not trigger a full resend
  *     (a rebase re-sends every agent) on each flip.
+ *
+ * THE EXTRAPOLATION CONTRACT (client <-> server). Read this before changing either side.
+ *   The client draws a replicated agent at   SentPos + SentVel * min(elapsed, MaxExtrapolationSec).
+ *   The server decides what to resend by predicting EXACTLY that (Extrapolate / ShouldResend), and it re-sends a walking
+ *   agent every HeartbeatSec at the latest, i.e. before the client's extrapolation runs out. Both sides use the
+ *   constants below. There is no second, private cap on the client that the server does not know about.
+ *   (The first version had one: the server assumed a straight walker could be extrapolated for ever, the client stopped
+ *   after 1.5 s. Agents froze in the middle of a walk and jumped to the right place at the next update.)
  */
 namespace CrowdNet
 {
@@ -25,6 +33,21 @@ namespace CrowdNet
 
 	/** Largest bubble radius that is guaranteed to fit the int16 range: 110 m (rebase distance) + 210 m = 320 m < 327.67 m. */
 	constexpr float MaxBubbleRadiusCm = 21000.f;
+
+	/**
+	 * A client never extrapolates an agent for longer than this after the last update it received for it
+	 * (a stalled connection must not fling agents across the map). The server knows this: see ShouldResend().
+	 */
+	constexpr double MaxExtrapolationSec = 3.0;
+
+	/** A walking agent that has been silent this long is re-sent, so a healthy connection never reaches the cap above. */
+	constexpr double HeartbeatSec = 2.0;
+
+	/** Interest set hysteresis: an agent that is already replicated to a player counts as 10 % closer than it is ... */
+	constexpr double InterestKeepDistanceFactor = 0.9;
+
+	/** ... and stays in range up to 10 % beyond the radius a newcomer needs. */
+	constexpr double InterestExitRadiusFactor = 1.1;
 
 	FORCEINLINE int16 QuantizeOffset(double RelativeCm)
 	{
@@ -63,8 +86,30 @@ namespace CrowdNet
 	}
 
 	/**
-	 * Dead reckoning: the client extrapolates SentPos + SentVel * dt. The server only resends an agent when
-	 * that prediction drifts further than ToleranceCm from the truth, or the velocity changed noticeably.
+	 * Where the client draws an agent (before its cosmetic smoothing): the last received state plus velocity * elapsed,
+	 * with elapsed capped at MaxExtrapolationSec. The server calls the same function to know what the client sees.
+	 */
+	FORCEINLINE FVector2D Extrapolate(const FVector2D& SentPos, const FVector2f& SentVel, double SecondsSinceSent)
+	{
+		const double Elapsed = FMath::Clamp(SecondsSinceSent, 0.0, MaxExtrapolationSec);
+		return SentPos + FVector2D(SentVel.X, SentVel.Y) * Elapsed;
+	}
+
+	/**
+	 * The velocity a client walks a drawn agent with (CrowdSmoothing's velocity feed-forward): the replicated one while
+	 * extrapolation is allowed, ZERO once the cap has run out. Past the cap Extrapolate() no longer advances the position,
+	 * so the velocity must not keep pushing the drawn agent either: a stalled connection ends in a gentle stop.
+	 */
+	FORCEINLINE FVector2f DrivingVelocity(const FVector2f& SentVel, double SecondsSinceSent)
+	{
+		return SecondsSinceSent > MaxExtrapolationSec ? FVector2f::ZeroVector : SentVel;
+	}
+
+	/**
+	 * Dead reckoning: the server only resends an agent when
+	 *   * what the client draws (Extrapolate) drifts further than ToleranceCm from the truth, or
+	 *   * the velocity changed noticeably (a new walking segment, a pause, a restart), or
+	 *   * a walking agent has been silent for HeartbeatSec (the client's extrapolation must never run dry).
 	 * SentPos / SentVel must be the DEQUANTIZED values, i.e. exactly what the client believes.
 	 */
 	inline bool ShouldResend(
@@ -72,13 +117,49 @@ namespace CrowdNet
 		const FVector2D& SentPos, const FVector2f& SentVel,
 		double SecondsSinceSent, float ToleranceCm, float VelocityEpsCmPerSec)
 	{
-		const FVector2D Predicted = SentPos + FVector2D(SentVel.X, SentVel.Y) * SecondsSinceSent;
+		const FVector2D Predicted = Extrapolate(SentPos, SentVel, SecondsSinceSent);
 		if (FVector2D::DistSquared(TruePos, Predicted) > static_cast<double>(ToleranceCm) * ToleranceCm)
 		{
 			return true;
 		}
 
 		const FVector2f DeltaV = TrueVel - SentVel;
-		return DeltaV.SizeSquared() > VelocityEpsCmPerSec * VelocityEpsCmPerSec;
+		if (DeltaV.SizeSquared() > VelocityEpsCmPerSec * VelocityEpsCmPerSec)
+		{
+			return true;
+		}
+
+		return SecondsSinceSent >= HeartbeatSec && !SentVel.IsNearlyZero();
+	}
+
+	/**
+	 * Sort key of an interest set candidate (smaller = more important). Agents that are already replicated get a head
+	 * start, so an agent hovering around the cut-off rank does not enter and leave the set again and again.
+	 */
+	FORCEINLINE double InterestRank(double DistSq, bool bAlreadyReplicated)
+	{
+		return bAlreadyReplicated ? DistSq * (InterestKeepDistanceFactor * InterestKeepDistanceFactor) : DistSq;
+	}
+
+	/** Radius inside which an already replicated agent may stay. Never above MaxBubbleRadiusCm (int16 range). */
+	FORCEINLINE double InterestExitRadius(double EnterRadiusCm)
+	{
+		return FMath::Min(EnterRadiusCm * InterestExitRadiusFactor, static_cast<double>(MaxBubbleRadiusCm));
+	}
+
+	/**
+	 * Is an agent at DistSq (squared distance to the viewer) a candidate for the interest set, and with which sort key?
+	 * A newcomer has to be inside EnterRadiusCm, a member may stay up to InterestExitRadius(EnterRadiusCm). The caller
+	 * sorts the candidates by OutRank and keeps the first MaxAgentsPerBubble. ACrowdBubble and the tests use this very function.
+	 */
+	FORCEINLINE bool InterestCandidate(double DistSq, bool bAlreadyReplicated, double EnterRadiusCm, double& OutRank)
+	{
+		const double Radius = bAlreadyReplicated ? InterestExitRadius(EnterRadiusCm) : EnterRadiusCm;
+		if (DistSq > Radius * Radius)
+		{
+			return false;
+		}
+		OutRank = InterestRank(DistSq, bAlreadyReplicated);
+		return true;
 	}
 }

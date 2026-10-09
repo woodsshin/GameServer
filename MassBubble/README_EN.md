@@ -494,7 +494,7 @@ if (bStructural || NumDirty > 0) { MARK_PROPERTY_DIRTY_FROM_NAME(ACrowdBubble, A
 
 #### Iris / Legacy Dual-Replication Design
 
-`FCrowdAgentArray` is a standard `FFastArraySerializer`, so it **works on both** the legacy NetDriver (`NetDeltaSerialize`) and Iris (which supports existing FastArray definitions), and the same build can be compared by switching `-UseIrisReplication=0 / 1`. Because the two systems behave differently, the following handling is in place.
+`FCrowdAgentArray` is a standard `FFastArraySerializer`, so it **works on both** the legacy NetDriver (`NetDeltaSerialize`) and Iris (which supports existing FastArray definitions), and the same build can be compared by switching `-UseIrisReplication=0 / 1` parameters. Because the two systems behave differently, the following handling is in place.
 
 ```cpp
 // Net/CrowdBubble.cpp — ServerRebuild: after the swap-remove (abridged)
@@ -523,7 +523,7 @@ if (bFirstTime || NetId != AppliedNetId || X != AppliedX || Y != AppliedY || VX 
 
 #### Network Insights Analysis
 
-On both the `-UseIrisReplication=1` (Iris) and `-UseIrisReplication=0` (Legacy FastArray) paths, we confirmed that `ACrowdBubble`'s `AgentArray` is replicated to the client correctly. The two captures are packets taken from different runs, and their purpose is to verify the **runtime serialization and replication path**, not to compare bandwidth (a KB/s benchmark).
+On both Iris and Legacy FastArray, we confirmed that `ACrowdBubble`'s `AgentArray` is replicated to the client correctly. The two captures are packets taken from different runs, and their purpose is to verify the **runtime serialization and replication path**, not to compare bandwidth (a KB/s benchmark).
 
 <p align="center">
   <img src="Image/UnrealInsight_Network_Profiler_Iris_whole_array_replicated_issue.PNG" alt="Network Insights - Iris (-UseIrisReplication=1)" width="1275"><br>

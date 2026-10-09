@@ -5,6 +5,7 @@
 #include "Crowd/CrowdMath.h"
 #include "Crowd/CrowdSettings.h"
 #include "Crowd/CrowdSubsystem.h"
+#include "Crowd/CrowdWander.h"
 
 #include "MassExecutionContext.h"
 
@@ -131,6 +132,7 @@ void UCrowdMovementProcessor::Execute(FMassEntityManager& EntityManager, FMassEx
 	const bool bTimeSlice = CrowdCVars::TimeSlicing != 0;
 
 	std::atomic<int32> Simulated{ 0 };
+	std::atomic<int32> Clamped{ 0 };
 
 	// Only touches data of its own chunk, so it is safe to run concurrently on several chunks.
 	auto ProcessChunk = [&](FMassExecutionContext& ChunkContext)
@@ -142,6 +144,7 @@ void UCrowdMovementProcessor::Execute(FMassEntityManager& EntityManager, FMassEx
 		const TArrayView<FCrowdLODFragment> LODs = ChunkContext.GetMutableFragmentView<FCrowdLODFragment>();
 
 		int32 LocalSimulated = 0;
+		int32 LocalClamped = 0;
 
 		for (int32 i = 0; i < NumEntities; ++i)
 		{
@@ -162,40 +165,22 @@ void UCrowdMovementProcessor::Execute(FMassEntityManager& EntityManager, FMassEx
 			const float Step = FMath::Min(LOD.PendingDelta + DeltaTime, Tuning.MaxStepDeltaSec);
 			LOD.PendingDelta = 0.f;
 
-			FCrowdMotionFragment& Motion = Motions[i];
-
-			// ---- wander: pick a new heading when the timer runs out ----
-			Motion.RetargetTimer -= Step;
-			if (Motion.RetargetTimer <= 0.f)
-			{
-				const float Angle = CrowdMath::Random01(Motion.Rng) * (2.f * UE_PI);
-				const float Speed = FMath::Lerp(Tuning.MinSpeedCmPerSec, Tuning.MaxSpeedCmPerSec, CrowdMath::Random01(Motion.Rng));
-				const bool bIdle = CrowdMath::Random01(Motion.Rng) < 0.25f; // a quarter of the crowd stands still
-				float SinA = 0.f;
-				float CosA = 1.f;
-				FMath::SinCos(&SinA, &CosA, Angle);
-				Motion.Velocity = bIdle ? FVector2f::ZeroVector : FVector2f(CosA * Speed, SinA * Speed);
-				Motion.RetargetTimer = FMath::Lerp(Tuning.MinRetargetSec, Tuning.MaxRetargetSec, CrowdMath::Random01(Motion.Rng));
-			}
-
-			// ---- integrate and leash to the home region (reflect at the border) ----
-			FVector2D NewLocation = Locations[i].Location + FVector2D(Motion.Velocity.X, Motion.Velocity.Y) * Step;
-
+			// Wander inside the home region (Crowd/CrowdWander.h). Pure function of this agent's own data, so it is
+			// safe on any chunk in parallel. The step is split at segment boundaries: skipping frames (time slicing)
+			// walks the same path as stepping every frame.
 			const double MinX = static_cast<double>(Ids[i].HomeX) * Tuning.RegionSizeCm;
 			const double MinY = static_cast<double>(Ids[i].HomeY) * Tuning.RegionSizeCm;
-			const double MaxX = MinX + Tuning.RegionSizeCm;
-			const double MaxY = MinY + Tuning.RegionSizeCm;
+			const CrowdWander::FBox2 Home{ FVector2D(MinX, MinY), FVector2D(MinX + Tuning.RegionSizeCm, MinY + Tuning.RegionSizeCm) };
 
-			if (NewLocation.X < MinX)       { NewLocation.X = MinX; Motion.Velocity.X =  FMath::Abs(Motion.Velocity.X); }
-			else if (NewLocation.X > MaxX)  { NewLocation.X = MaxX; Motion.Velocity.X = -FMath::Abs(Motion.Velocity.X); }
-			if (NewLocation.Y < MinY)       { NewLocation.Y = MinY; Motion.Velocity.Y =  FMath::Abs(Motion.Velocity.Y); }
-			else if (NewLocation.Y > MaxY)  { NewLocation.Y = MaxY; Motion.Velocity.Y = -FMath::Abs(Motion.Velocity.Y); }
-
-			Locations[i].Location = NewLocation;
+			if (CrowdWander::Advance(Locations[i].Location, Motions[i], Step, Home, Tuning, CrowdWander::TurnSignForId(Ids[i].NetId)))
+			{
+				++LocalClamped;
+			}
 			++LocalSimulated;
 		}
 
 		Simulated.fetch_add(LocalSimulated, std::memory_order_relaxed);
+		Clamped.fetch_add(LocalClamped, std::memory_order_relaxed);
 	};
 
 	if (CrowdCVars::ParallelMove != 0)
@@ -210,6 +195,8 @@ void UCrowdMovementProcessor::Execute(FMassEntityManager& EntityManager, FMassEx
 	const int32 SimulatedCount = Simulated.load(std::memory_order_relaxed);
 	INC_DWORD_STAT_BY(STAT_OptCrowd_Simulated, SimulatedCount);
 	CSV_CUSTOM_STAT(OptCrowd, Simulated, SimulatedCount, ECsvCustomStatOp::Set);
+	// Agents the safety clamp had to pull back into their region. The planner keeps them inside, so this reads 0.
+	CSV_CUSTOM_STAT(OptCrowd, WanderClamped, Clamped.load(std::memory_order_relaxed), ECsvCustomStatOp::Set);
 }
 
 // =================================================================================================

@@ -11,7 +11,7 @@
  *
  *   FCrowdIdFragment       16 B  identity + home region (read-mostly)
  *   FCrowdLocationFragment 16 B  position, double precision (LWC safe for huge worlds)
- *   FCrowdMotionFragment   16 B  velocity + wander state
+ *   FCrowdMotionFragment   24 B  velocity + wander state (see Crowd/CrowdWander.h)
  *   FCrowdLODFragment       8 B  current tier + accumulated delta for time slicing
  */
 
@@ -57,16 +57,25 @@ struct MASSBUBBLE_API FCrowdMotionFragment : public FMassFragment
 {
 	GENERATED_BODY()
 
+	/** Velocity of the current walking segment (cm/s). Zero while the agent pauses. */
 	UPROPERTY()
 	FVector2f Velocity = FVector2f::ZeroVector;
 
-	/** Seconds until the agent picks a new wander direction. */
+	/** Seconds until the current segment (walk or pause) ends and the agent plans the next one. */
 	UPROPERTY()
 	float RetargetTimer = 0.f;
 
 	/** xorshift32 state: allocation free, deterministic, per agent. */
 	UPROPERTY()
 	uint32 Rng = 1;
+
+	/** Direction of the last walking segment in radians. Kept while the agent pauses, so it walks on from where it faced. */
+	UPROPERTY()
+	float Heading = 0.f;
+
+	/** This agent's own preferred walking speed (cm/s). Segments vary around it, they do not re-roll it. */
+	UPROPERTY()
+	float CruiseSpeed = 140.f;
 };
 
 USTRUCT()
