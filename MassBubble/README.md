@@ -32,7 +32,7 @@
 
 NPC 규모가 커져도 아래 네 가지 비용이 모두 **관측 가능한 상한**을 갖도록 설계했습니다. 모든 최적화는 CVar 킬스위치로 개별 on/off 할 수 있어, 시뮬레이션을 통해서 확인합니다.
 
-| 비용 축 | 기존 구현 (Actor-per-NPC) | MassBubble 프로젝트 |
+| 비용 | 기존 구현 (Actor-per-NPC) | MassBubble 프로젝트 |
 |---|---|---|
 | 서버 CPU · 시뮬레이션 | NPC마다 Actor/Component Tick, 전원을 매 프레임 갱신 | Mass chunk 단위 연속된 배열로 처리, 거리 기반 LOD + time-slicing, 병렬 chunk 처리 |
 | 서버 CPU · 대역폭 · 복제 | NPC마다 ActorChannel, 프로퍼티 비교, 풀 상태 전송 | **플레이어당 Actor 1개**, Push Model, FastArray delta, Dead reckoning, 10 B 양자화 레코드 |
@@ -456,7 +456,7 @@ else
 - **배회 모델 (`CrowdWander.h`)** : agent는 직선 **구간**(`MinRetargetSec`–`MaxRetargetSec`)을 등속으로 걷고, 다음 구간의 방향은 이전 방향에 작은 회전(≤ `MaxTurnDeg`)을 더한 값입니다. 구간 하나가 곧 dead reckoning이 보낼 (위치, 속도) 한 쌍이라 부드러운 움직임이 대역폭을 더 쓰지 않습니다. region 경계에서는 반사하지 않고, 경계 안쪽 **band**에서 모든 agent가 같은 회전율(`WallTurnRateDeg`)로 휘어 빠져나오게 해 열린 땅의 밀도를 균일하게 유지합니다. 스텝은 구간 경계에서 쪼개지므로 time-slicing으로 건너뛰며 걸어도 같은 경로를 걷습니다. 모델 전체가 순수 함수이고 `Crowd.Wander.*` 테스트가 검증합니다.
 - `UCrowdSubsystem`은 `TMassExternalSubsystemTraits`에서 `GameThreadOnly = true`로 선언해, 이 서브시스템을 요구하는 프로세서(LOD, Snapshot)가 game thread에서만 접근하도록 명시합니다.
 
-#### 에디터 검증 — Unreal Insights
+#### Unreal Insights 검증
 
 <p align="center">
   <img src="Image/UnrealInsight_MassProcessor.PNG" alt="Unreal Insights - Mass processors" width="1000"><br>

@@ -32,7 +32,7 @@ This is a reference implementation of a pipeline that **simulates thousands to t
 
 The design ensures that the following four cost axes each have an **observable upper bound**, regardless of how large the NPC population grows. Every optimization can be toggled individually via CVar kill switches, ensuring each is validated by measurement rather than assumption.
 
-| Cost Axis | Naive Implementation (Actor-per-NPC) | MassBubble |
+| Cost | Naive Implementation (Actor-per-NPC) | MassBubble |
 |---|---|---|
 | Server CPU · Simulation | Actor/Component Tick per NPC; all agents updated every frame | Processing over contiguous per-chunk arrays in Mass, distance-based LOD + time-slicing, parallel chunk processing |
 | Server CPU · Bandwidth · Replication | One ActorChannel per NPC, property comparison, full-state transmission | **One Actor per player**, Push Model, FastArray delta serialization, dead reckoning, 10-byte quantized records |
@@ -420,7 +420,7 @@ else                               { EntityQuery.ForEachEntityChunk(Context, Pro
 - **Wander Model (`CrowdWander.h`)** — An agent walks straight **segments** (`MinRetargetSec`–`MaxRetargetSec`) at constant velocity, and the next segment's heading is the previous heading plus a small turn (≤ `MaxTurnDeg`). One segment is exactly the (position, velocity) pair dead reckoning sends, so smooth-looking motion costs no extra bandwidth. At the region border it does not reflect: inside a **band** along the border every agent bends away at the same turn rate (`WallTurnRateDeg`), which keeps the density of the open ground uniform. A step is split at segment boundaries, so skipping frames with time-slicing walks the same path. The whole model is pure functions, verified by the `Crowd.Wander.*` tests.
 - Main-thread-bound dependencies (LOD evaluation, Snapshot generation) declare a `GameThreadOnly = true` trait via `TMassExternalSubsystemTraits` to enforce execution isolation.
 
-#### Editor Verification — Unreal Insights (PIE)
+#### Unreal Insights Verification
 
 <p align="center">
   <img src="Image/UnrealInsight_MassProcessor.PNG" alt="Unreal Insights - Mass processors" width="1000"><br>
