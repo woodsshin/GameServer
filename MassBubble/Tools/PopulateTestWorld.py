@@ -1,7 +1,7 @@
 """
 Populates the CURRENTLY OPEN level with test content for the MassBubble project.
 
-How to use (Docs/WORLD_PARTITION_SETUP.md has the full walkthrough):
+How to use (WORLD_PARTITION_SETUP_EN.md has the full walkthrough):
   1. File > New Level > "Open World"  (a World Partition level)  and save it as /Game/Maps/L_MassBubbleWorld
   2. Tools > Execute Python Script...  and pick this file
      (needs the Python Editor Script Plugin, which MassBubble.uproject enables for the Editor target)

@@ -1348,6 +1348,7 @@ PCG 그래프를 쓰면 밀도가 균일하지 않고 agent 수도 달라지므�
 - **GC 설정** : Incremental GC는 `Config/DefaultEngine.ini`의 `gc.*` 값으로 켭니다 (13장 ④).
 - **Push Model 활성** : `[SystemSettings] net.IsPushModelEnabled=1`. 꺼져 있으면 dirty 마킹이 효과가 없고 프로퍼티가 일반 경로로 비교됩니다.
 - **Iris** : `-UseIrisReplication=1`(또는 `net.Iris.UseIrisReplication`)로 켭니다. Iris는 `net.SubObjects.DefaultUseSubObjectReplicationList=1`이 필요하며, `opt.net.Info`가 현재 설정을 로그로 보여 줍니다.
+- **맵 생성** : 월드 파티션 맵(`L_MassBubbleWorld`)은 repository에 추가되어 있지 않습니다. `PopulateTestWorld.py` 스크립트를 이용해서 생성할 수 있습니다. [월드 파티션 맵 생성하기](./Tools/WORLD_PARTITION_SETUP.md)
 - World Partition 맵 + 서버 스트리밍 `wp.Runtime.EnableServerStreaming=1`.
 
 ### 빌드

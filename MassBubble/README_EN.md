@@ -1284,11 +1284,12 @@ Delete the rows you did not measure, rename the section title to "Design Figures
 - **GC Settings** — Incremental GC is turned on with the `gc.*` values in `Config/DefaultEngine.ini` (§13 ④).
 - **Push Model Activation** — Must be explicitly enabled in your configuration layout: `[SystemSettings] net.IsPushModelEnabled=1`. If disabled, properties fall back to standard comparative evaluation channels.
 - **(Optional) Iris** — Turn it on with `-UseIrisReplication=1` (or `net.Iris.UseIrisReplication`). Iris requires `net.SubObjects.DefaultUseSubObjectReplicationList=1`, and `opt.net.Info` logs the current settings.
+- **Map Generation** - The World Partition map (`L_MassBubbleWorld`) is not included in the repository. You can generate it by running `PopulateTestWorld.py` script. For more details, refer to [Creating the World Partition Map](./Tools/WORLD_PARTITION_SETUP_EN.md)
 - **World Layout** — Requires a World Partition map paired with server-side streaming enabled: `wp.Runtime.EnableServerStreaming=1`.
 
 ### Build Compilation
 
-- Client Build : [Download](https://drive.google.com/file/d/1uhwscE3nmQTjUshX3ybWRRV_59VS3g-P/view?usp=sharing)
+- Client Build : [Download](https://drive.google.com/file/d/1oxyFlrTBqCj0E9axmrUBnkvx0m1OARsp/view?usp=sharing)
 - Dedicated Server Build : [download](https://drive.google.com/file/d/1MHaeaeesiHfkTWKNaNiU2N-Zf7Ecosye/view?usp=sharing)
 
 ```bash
