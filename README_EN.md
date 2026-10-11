@@ -13,7 +13,7 @@ A collection of projects centered on Network Programming and Game Engine Middlew
 | [UnrealPlugins/OnlineSubsystemEOS](./UnrealPlugins/OnlineSubsystemEOS/README_EN.md) | A Native Code Plugin that wraps Epic Online Services in Unreal Engine's standard `OnlineSubsystem` interface | Unreal Engine, C++, EOS SDK |
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README_EN.md) | A Native Code Plugin that automatically registers port forwarding on a router via the UPnP IGD protocol | Unreal Engine, C++, SSDP/SOAP |
 | [Kiraverse](./Kiraverse/README_EN.md) | A C++ multiplayer gameplay core built on Unreal Engine 5.4's Gameplay Ability System (GAS). Implements a Hitscan/Projectile weapon-swap architecture and a Bomb Defusal (plant/defuse) round loop, Bot PvP | Unreal Engine, C++, Gameplay Ability System |
-| [MassBubble](./MassBubble/README_EN.md) | Mass Entity-based large-scale NPC server simulation (LOD, time-slicing, parallel processing) with per-player AOI replication (Iris, Push Model, FastArray, dead reckoning, 10 B quantized records) and client-side ISM batched rendering | Unreal Engine 5.8, C++, Mass Entity, World Partition, Iris, Push Model Replication |
+| [MassBubble](./MassBubble/README_EN.md) | PCG + Mass Entity-based large-scale NPC server simulation (LOD, time-slicing, parallel processing) with per-player AOI replication (Iris, Push Model, FastArray, dead reckoning, 10 B quantized records) and client-side ISM batched rendering | Unreal Engine 5.8, C++, PCG, Mass Entity, World Partition, Iris, Push Model Replication |
 
 ---
 

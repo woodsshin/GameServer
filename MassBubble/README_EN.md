@@ -1288,6 +1288,9 @@ Delete the rows you did not measure, rename the section title to "Design Figures
 
 ### Build Compilation
 
+- Client Build : [Download](https://drive.google.com/file/d/1uhwscE3nmQTjUshX3ybWRRV_59VS3g-P/view?usp=sharing)
+- Dedicated Server Build : [download](https://drive.google.com/file/d/1MHaeaeesiHfkTWKNaNiU2N-Zf7Ecosye/view?usp=sharing)
+
 ```bash
 # Execute via the root directory of your source-built engine (adjust environment paths accordingly)
 Engine\Build\BatchFiles\Build.bat MassBubbleServer Win64 Development -Project="D:\MassBubble\MassBubble.uproject"

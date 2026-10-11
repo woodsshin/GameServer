@@ -1,8 +1,8 @@
-계측과-실험-설계-프로파일-결과$0# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
+# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
 
 **Unreal Engine 5.8 데디케이티드 대규모 서버 최적화 샘플**
 
-서버 권위(Server-Authoritative) **Mass Entity** 시뮬레이션 · 플레이어별 **AOI(Area of Interest) 복제** · 클라이언트 **ISM 배칭 렌더링**
+서버 권위(Server-Authoritative) **PCG** 기반 **Mass Entity** 시뮬레이션 · 플레이어별 **AOI(Area of Interest) 복제** · 클라이언트 **ISM 배치 렌더링**
 
 ![Unreal Engine 5.8](https://img.shields.io/badge/Unreal%20Engine-5.8-0E1128?logo=unrealengine&logoColor=white)
 ![Target](https://img.shields.io/badge/Target-Dedicated%20Server-2ea44f)
@@ -1351,6 +1351,9 @@ PCG 그래프를 쓰면 밀도가 균일하지 않고 agent 수도 달라지므�
 - World Partition 맵 + 서버 스트리밍 `wp.Runtime.EnableServerStreaming=1`.
 
 ### 빌드
+
+- [클라이언트 빌드 다운로드](https://drive.google.com/file/d/1oxyFlrTBqCj0E9axmrUBnkvx0m1OARsp/view?usp=sharing)
+- [데디케이티드 서버 빌드 다운로드](https://drive.google.com/file/d/1MHaeaeesiHfkTWKNaNiU2N-Zf7Ecosye/view?usp=sharing)
 
 ```bash
 # 소스 빌드 엔진 루트 기준 (경로는 환경에 맞게 수정)
