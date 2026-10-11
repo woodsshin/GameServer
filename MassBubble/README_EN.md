@@ -1060,7 +1060,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 | Tool | How to Use | What You Can See |
 |---|---|---|
 | Stat | Server `stat OptCrowd` · client `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble / PCG Plan Pump cycles, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` ([Network Insights Analysis](#network-insights-analysis)) |
-| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*` and `Opt.Render.Update` scopes, Networking Insights (per-packet `CrowdBubble` / `AgentArray` bit counts, distinguishing the Iris · legacy replication path — [Stat Screen](##stat-screen-example--stat-optcrowd--stat-optrender)) |
+| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*` and `Opt.Render.Update` scopes, Networking Insights (per-packet `CrowdBubble` / `AgentArray` bit counts, distinguishing the Iris · legacy replication path — [Stat Screen](#stat-screen-example--stat-optcrowd--stat-optrender)) |
 | Memory Insights | LLM tags `OptCrowd/*` (Memory trace in Unreal Insights) | Per-tag memory over time (`OptCrowd` · `OptCrowd/Entities` · `OptCrowd/Grids` · `OptCrowd/Bubble`), Alloc/Free event count ([Memory Insights Graph Analysis](#memory-insights-graph-analysis)) |
 | CSV Profiler | `csvprofile start` / `csvprofile stop` | Categories `OptCrowd` (including `StreamingBusyCells`, `PlansPending` and `WanderClamped`) and `OptRender` (also works in Test builds) |
 | Log | `opt.crowd.Stats` | Count per region state (planning included), LOD tier distribution, viewer count, spawn / despawn queue lengths, snapshot region count, pending bot operations, PCG planner summary, WP busy cells · last GC summary, current switch values |
