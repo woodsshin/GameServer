@@ -1,4 +1,4 @@
-계측과-실험-설계$0# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
+계측과-실험-설계-프로파일-결과$0# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
 
 **Unreal Engine 5.8 데디케이티드 대규모 서버 최적화 샘플**
 
@@ -18,7 +18,7 @@
 - [핵심 요약](#핵심-요약)
 - [아키텍처](#아키텍처)
 - [구현 상세](#구현-상세)
-- [계측과 실험 설계](#계측과-실험-설계)
+- [계측과 실험 설계](#계측과-실험-설계-프로파일-결과)
 - [검증 (Automation Tests)](#검증-automation-tests)
 - [설계 수치](#설계-수치)
 - [시작하기](#시작하기)
@@ -464,7 +464,7 @@ else
 </p>
 
 - **스레드 배치** : `CrowdLODProcessor_0`(≈ 141 µs)와 `CrowdSnapshotProcessor_0`(≈ 485 µs, snapshot이 실행된 프레임)는 Game Thread의 `MassProcessingQueue Main-Thread Runner Task` 안에서, `CrowdMovementProcessor`(`Opt.Crowd.Move` ≈ 75 µs)는 `Foreground Worker #0`의 `Mass Processor Worker Task`에서 실행됩니다. [스레딩 모델](#스레딩-모델) 표의 배치(LOD · Snapshot = game thread, Movement = worker)와 같습니다.
-- **`OPT_SCOPE` 이벤트** : 프로세서 스코프 안에 `Opt.Crowd.LOD` / `Opt.Crowd.Move` / `Opt.Crowd.Snapshot`이 중첩되어 보이고, 타이머 패널에는 `Opt.Crowd.Director`, `Opt.Crowd.Bubble`, `Opt.Crowd.SpawnSlice` / `DespawnSlice`가 같은 이름 체계로 나열됩니다 ([계측과 실험 설계](#계측과-실험-설계)).
+- **`OPT_SCOPE` 이벤트** : 프로세서 스코프 안에 `Opt.Crowd.LOD` / `Opt.Crowd.Move` / `Opt.Crowd.Snapshot`이 중첩되어 보이고, 타이머 패널에는 `Opt.Crowd.Director`, `Opt.Crowd.Bubble`, `Opt.Crowd.SpawnSlice` / `DespawnSlice`가 같은 이름 체계로 나열됩니다 ([계측과 실험 설계](#계측과-실험-설계-프로파일-결과)).
 - **프레임 비중** : 이 프레임에서 Mass `PrePhysics` phase 전체는 ≈ 0.79 ms, 프레임은 14.03 ms입니다. 단일 프레임 샘플이므로 벤치마크가 아니며, 비교 측정은 A/B 스위치로 합니다.
 
 ### 6. Snapshot과 공간 격자
@@ -1083,7 +1083,7 @@ gc.IncrementalReachabilityTimeLimit=0.002
 - **World Partition이 원인** : `peak during the last frame` / `state changes`가 큽니다. 셀 활동이 한 프레임 안에 끝나도 `peak`로 남습니다.
 - **NPC spawn / despawn이 원인** : `regions spawning` / `queues`가 차 있습니다 (시분할 처리시간이 부족하거나 `opt.crowd.BudgetedPump 0`). `planning` / `pcg plans pending`은 PCG 계획을 기다리는 region 수이며, 그래프 실행이 밀리는지는 `opt.crowd.PCG.Stats`로 봅니다.
 
-이 항목은 엔진의 레벨 스트리밍 · GC 동작에 의존하므로 Automation Test 대상이 아닙니다. 효과 크기는 `opt.hitch.LogMs` 로그와 [계측과 실험 설계](#계측과-실험-설계)의 A/B 스위치로 측정합니다.
+이 항목은 엔진의 레벨 스트리밍 · GC 동작에 의존하므로 Automation Test 대상이 아닙니다. 효과 크기는 `opt.hitch.LogMs` 로그와 [계측과 실험 설계](#계측과-실험-설계-프로파일-결과)의 A/B 스위치로 측정합니다.
 
 #### 에디터 검증 — World Partition (PIE)
 
@@ -1455,4 +1455,4 @@ Project Settings 화면(`DefaultGame.ini`에 저장)입니다. 외삽 상한(`Ma
   <sub>Game › MassBubble Crowd Rendering — ClientOnly 모듈이라 데디케이티드 서버는 이 클래스를 로드하지 않습니다</sub>
 </p>
 
-스트리밍 프로파일(`s.*` / `wp.*`)과 Quiet GC · Hitch 로그 임계값은 프로젝트 설정이 아니라 CVar(`opt.stream.*`, `opt.hitch.LogMs`)입니다. [계측과 실험 설계](#계측과-실험-설계)의 A/B 킬스위치 표를 참고하세요.
+스트리밍 프로파일(`s.*` / `wp.*`)과 Quiet GC · Hitch 로그 임계값은 프로젝트 설정이 아니라 CVar(`opt.stream.*`, `opt.hitch.LogMs`)입니다. [계측과 실험 설계](#계측과-실험-설계-프로파일-결과)의 A/B 킬스위치 표를 참고하세요.

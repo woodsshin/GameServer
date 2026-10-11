@@ -18,7 +18,7 @@ Server-authoritative **PCG** based **Mass Entity** simulation · per-player **AO
 - [Key Takeaways](#key-takeaways)
 - [Architecture](#architecture)
 - [Implementation Details](#implementation-details)
-- [Instrumentation and Experiment Design](#instrumentation-and-experiment-design)
+- [Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results)
 - [Verification (Automation Tests)](#verification-automation-tests)
 - [Design Figures](#design-figures)
 - [Getting Started](#getting-started)
@@ -428,7 +428,7 @@ else                               { EntityQuery.ForEachEntityChunk(Context, Pro
 </p>
 
 - **Thread placement**: `CrowdLODProcessor_0` (≈ 141 µs) and `CrowdSnapshotProcessor_0` (≈ 485 µs, on a frame where a snapshot ran) run inside the Game Thread's `MassProcessingQueue Main-Thread Runner Task`, while `CrowdMovementProcessor` (`Opt.Crowd.Move` ≈ 75 µs) runs in the `Mass Processor Worker Task` on `Foreground Worker #0`. This matches the placement in the [Threading Model](#threading-model) table (LOD · Snapshot = game thread, Movement = worker).
-- **`OPT_SCOPE` events**: `Opt.Crowd.LOD` / `Opt.Crowd.Move` / `Opt.Crowd.Snapshot` appear nested inside the processor scopes, and the timer panel lists `Opt.Crowd.Director`, `Opt.Crowd.Bubble`, and `Opt.Crowd.SpawnSlice` / `DespawnSlice` under the same naming scheme ([Instrumentation and Experiment Design](#instrumentation-and-experiment-design)).
+- **`OPT_SCOPE` events**: `Opt.Crowd.LOD` / `Opt.Crowd.Move` / `Opt.Crowd.Snapshot` appear nested inside the processor scopes, and the timer panel lists `Opt.Crowd.Director`, `Opt.Crowd.Bubble`, and `Opt.Crowd.SpawnSlice` / `DespawnSlice` under the same naming scheme ([Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results)).
 - **Share of the frame**: in this frame the whole Mass `PrePhysics` phase takes ≈ 0.79 ms out of a 14.03 ms frame. This is a single-frame sample, not a benchmark; comparative measurements are done with the A/B switches.
 
 ### 6. Snapshot and Spatial Grid
@@ -1021,7 +1021,7 @@ With `opt.hitch.LogMs N` (> 0), one line is logged for every frame longer than N
 - **World Partition is the cause**: `peak during the last frame` / `state changes` are large. Even if the cell activity finished within a single frame, it remains as `peak`.
 - **NPC spawn / despawn is the cause**: `regions spawning` / `queues` are filled (the budget is insufficient, or `opt.crowd.BudgetedPump 0`). `planning` / `pcg plans pending` count the regions waiting for a PCG plan; whether graph runs are backing up is seen with `opt.crowd.PCG.Stats`.
 
-This item depends on the engine's level-streaming and GC behavior, so it is not an Automation Test target. The size of the effect is measured with the `opt.hitch.LogMs` log and the A/B switches in [Instrumentation and Experiment Design](#instrumentation-and-experiment-design).
+This item depends on the engine's level-streaming and GC behavior, so it is not an Automation Test target. The size of the effect is measured with the `opt.hitch.LogMs` log and the A/B switches in [Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results).
 
 #### Editor Verification — World Partition (PIE)
 
@@ -1038,7 +1038,7 @@ This item depends on the engine's level-streaming and GC behavior, so it is not 
 - **Scope**: It is Standalone PIE, so the dedicated-server-only entries (`wp.Runtime.*`, ①) are not applied in this environment. The applied state in a server process is checked with `opt.stream.Dump`.
 
 ---
-## Instrumentation and Experiment Design ([Profiling Results](./Tools/Profiling.md))
+## Instrumentation and Experiment Design ([Profiling Results](./Tools/Profiling_EN.md))
 
 A consolidated tracking macro couples multiple profiling layers into a clean, single-statement interface.
 
@@ -1391,4 +1391,4 @@ These are the Project Settings screens (saved in `DefaultGame.ini`). The extrapo
   <sub>Game › MassBubble Crowd Rendering — this is a ClientOnly module, so a dedicated server does not load this class</sub>
 </p>
 
-The streaming profile (`s.*` / `wp.*`) and the Quiet GC · hitch-log thresholds are CVars (`opt.stream.*`, `opt.hitch.LogMs`), not project settings. See the A/B kill switch table in [Instrumentation and Experiment Design](#instrumentation-and-experiment-design).
+The streaming profile (`s.*` / `wp.*`) and the Quiet GC · hitch-log thresholds are CVars (`opt.stream.*`, `opt.hitch.LogMs`), not project settings. See the A/B kill switch table in [Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results).
