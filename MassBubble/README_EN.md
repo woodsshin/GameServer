@@ -35,7 +35,7 @@ Server-authoritative **PCG** based **Mass Entity** simulation · per-player **AO
 - [Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results)
 - [Verification (Automation Tests)](#verification-automation-tests)
 - [Design Figures](#design-figures)
-  - [Analytical Estimates](#analytical-estimates-default-settings) · [Measured Results](#measured-results)
+  - [Analytical Estimates](#analytical-estimates-default-settings) · [Measured Results](./Tools/Profiling.md)
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites) · [Build Compilation](#build-compilation) · [Execution](#execution) · [Testing Automation Execution](#testing-automation-execution)
 - [Configuration](#configuration)
