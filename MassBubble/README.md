@@ -1,4 +1,4 @@
-# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
+계측과-실험-설계$0# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
 
 **Unreal Engine 5.8 데디케이티드 대규모 서버 최적화 샘플**
 
@@ -48,20 +48,20 @@ NPC 규모가 커져도 아래 네 가지 비용이 모두 **관측 가능한 �
 | 영역 | 접근 방식 | 효과 | 주요 파일 |
 |---|---|---|---|
 | 시뮬레이션 | 접근 패턴 단위 fragment 분리, 단일 Archetype, **LOD를 값(fragment)으로 저장** | 데이터 연속 배치를 통해 캐시 미스를 방지, LOD 변경 시 메모리 재배치 연산 부하로 인한 **구조적 성능 저하**(Structural Change)를 근본적으로 차단 | `CrowdFragments.h` |
-| 시뮬레이션 | 거리 기반 **LOD + time-slicing** (1 / 2 / 6 / 0 프레임) + 보정(hysteresis) | 기본 설정 · 뷰어 1명 · region당 400개(랜덤 배치) 기준 실제 이동 연산 횟수를 크게 감소 **≈ 830 / 10,000** (해석적 추정) | `CrowdProcessors.cpp`, `CrowdMath.h` |
+| 시뮬레이션 | 거리 기반 **LOD + time-slicing** (1 / 2 / 6 / 0 프레임) + 보정(hysteresis) | 기본 설정 · 뷰어 1명 · region당 400개(랜덤 배치) 기준 실제 이동 연산 횟수를 크게 감소 **≈ 830 / 10,000** (해석적 추정) | `CrowdProcessors.cpp`<br>`CrowdMath.h` |
 | 시뮬레이션 | 개체별 병렬 처리(`ParallelForEachEntityChunk`) 및 로컬 영역 내 독립적인 데이터 기록 | Worker thread 분산, lock 불필요 | `CrowdProcessors.cpp` |
 | 스트리밍 | Region 소유 상태 및 실시간 제한 기준 처리 + 부하 발생 시 생성/소멸 축소 + **결정론적 복구** | WP 셀 unload/reload와 무관, spawn으로 인한 프레임 드랍 방지 | `CrowdSubsystem.cpp` |
-| 스폰 계획 | **UCrowdPCGPlanner 기반 새 region 생성 위치 결정** (`UCrowdPCGPlanner`) + `CrowdPlan::BuildAgents`를 Point의 에이전트 변환 | 디자이너 설정 밀도 및 분포 기반 서버 인구(Population) 초기 상태. 기존 리전 스케줄러를 통한 스폰 시점·예산·영속성 관리 (PCG는 데이터 생성기 역할). 시분할 스폰 및 결정론적 복구 시스템과의 연동. PCG 그래프 실패 시 랜덤 배치 폴백. | `CrowdPCGPlanner.cpp`, `CrowdPCGHost.cpp`, `CrowdPlan.h` |
-| 스트리밍 | **WP 로딩 / 언로딩 순간 버벅임(Hitch) 방지** + 엔진 streaming CVar 프로파일 + 고부하 셀 감시 + **Quiet GC** + **Incremental GC** | 셀 로드 / 제거 중에는 GC · NPC 구조 변경을 미루고 엔진 작업과 GC 자체는 프레임에 분산, Hitch 원인(GC / WP / crowd)을 로그로 구분 | `MassBubbleStreamingMonitor.cpp`, `MassBubbleRuntimeConfig.cpp` |
+| 스폰 계획 | **UCrowdPCGPlanner 기반 새 region 생성 위치 결정** (`UCrowdPCGPlanner`) + `CrowdPlan::BuildAgents`를 Point의 에이전트 변환 | 디자이너 설정 밀도 및 분포 기반 서버 인구(Population) 초기 상태. 기존 리전 스케줄러를 통한 스폰 시점·예산·영속성 관리 (PCG는 데이터 생성기 역할). 시분할 스폰 및 결정론적 복구 시스템과의 연동. PCG 그래프 실패 시 랜덤 배치 폴백. | `CrowdPCGPlanner.cpp`<br>`CrowdPCGHost.cpp`<br>`CrowdPlan.h` |
+| 스트리밍 | **WP 로딩 / 언로딩 순간 버벅임(Hitch) 방지** + 엔진 streaming CVar 프로파일 + 고부하 셀 감시 + **Quiet GC** + **Incremental GC** | 셀 로드 / 제거 중에는 GC · NPC 구조 변경을 미루고 엔진 작업과 GC 자체는 프레임에 분산, Hitch 원인(GC / WP / crowd)을 로그로 구분 | `MassBubbleStreamingMonitor.cpp`<br>`MassBubbleRuntimeConfig.cpp` |
 | 공간 탐색 | Region별 균일 격자 + **계수 정렬**(counting sort) 기반으로 재배치 | 연산 속도 최적화 O(N + cells), 초기 구동 이후 재할당 없음, 전체 맵 크기와 무관하게 안정적인 성능 유지 | `CrowdCellGrid.h` |
 | 공간 탐색 | 실제 플레이어의 bubble에 닿는 region만 snapshot | 봇 전용 region은 grid 구축(복사 + counting sort) 생략 | `CrowdSubsystem.cpp` |
 | 복제 | **플레이어당 Actor 1개로 제한** (`bOnlyRelevantToOwner` + `COND_OwnerOnly`) + **Push Model** | NPC당 ActorChannel 제거, 변경 사항(Dirty)이 없을 경우 데이터 비교 연산 비용을 0으로 최적화 | `CrowdBubble.cpp` |
 | 복제 | 데이터 정밀도 축소(**데이터 경량화/양자화**) 및 200m 격자 기준 **좌표 재설정**(Origin Rebasing) | agent당 **10 B** (기존 52 B 대비 −81%) | `CrowdNetMath.h` |
 | 복제 | **Dead reckoning** (거리별 허용 오차) | 등속 직진 에이전트는 heartbeat(2초) 사이에 재전송 0회, 데드 레코닝 활성화 시 총 메시지 송신량이 기존 대비 **15% 미만**으로 감소 | `CrowdNetMath.h`, `CrowdTests.cpp` |
-| 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교. Network Insights에서 두 경로 모두 클라이언트로 `AgentArray`가 복제되는 것을 확인 | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
+| 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교. Network Insights에서 두 경로 모두 클라이언트로 `AgentArray`가 복제되는 것을 확인 | `CrowdBubble.cpp`<br>`MassBubbleRuntimeConfig.cpp` |
 | 클라이언트 | 외삽 + **smoothing**(속도 이징 · 위치 보정 · yaw) + **ISM 1개 batch update** | 400 agent = Actor 1 / Render State 및 Draw Call 최적화 | `CrowdRenderSubsystem.cpp` |
 | 빌드 | **`ClientOnly` 모듈 분리** | 서버 타깃에 렌더 모듈이 포함되지 않음 | `MassBubble*.Target.cs` |
-| 검증 | CVar 킬스위치, stat / CSV / Insights 통합 계측, **Hitch 로그**, Automation Test 17종 | 최적화를 측정하고 성능 검증, Hitch는 원인별로 구분 | `CrowdSettings.cpp`, `MassBubbleStats.h`, `MassBubbleStreamingMonitor.cpp`, `CrowdTests.cpp`, `CrowdPlanTests.cpp` |
+| 검증 | CVar 킬스위치, stat / CSV / Insights 통합 계측, **Hitch 로그**, Automation Test 17종 | 최적화를 측정하고 성능 검증, Hitch는 원인별로 구분 | `CrowdSettings.cpp`<br>`MassBubbleStats.h`<br>`MassBubbleStreamingMonitor.cpp`<br>`CrowdTests.cpp`<br>`CrowdPlanTests.cpp` |
 
 ---
 
@@ -1100,7 +1100,7 @@ gc.IncrementalReachabilityTimeLimit=0.002
 - **범위** : Standalone PIE라서 데디케이티드 서버 전용 항목(`wp.Runtime.*`, ①)은 적용되지 않은 환경입니다. 서버 프로세스에서의 적용 상태는 `opt.stream.Dump`로 확인합니다.
 
 ---
-## 계측과 실험 설계
+## 계측과 실험 설계 ([프로파일 결과](./Tools/Profiling.md))
 
 통합 프로파일링 매크로 구현을 통한 교차 분석 편의성 극대화합니다.
 
@@ -1147,7 +1147,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 
 <p align="center">
   <img src="Image/MassBubble_MemoryInsight.PNG" alt="Memory Insights - LLM OptCrowd 태그 메모리 추이와 Alloc/Free Event Count" width="1281"><br>
-  <sub>Unreal Insights › Memory Insights — <code>Alloc/Free Event Count</code> · LLM <code>OptCrowd</code> · <code>OptCrowd/Bubble</code> · <code>OptCrowd/Entities</code> · <code>OptCrowd/Grids</code> (약 10분)</sub>
+  <sub>Unreal Insights › Memory Insights — <code>Alloc/Free Event Count</code> · LLM <code>OptCrowd</code> · <code>OptCrowd/Bubble</code> · <code>OptCrowd/Entities</code> · <code>OptCrowd/Grids</code></sub>
 </p>
 
 LLM(Low Level Memory Tracker) 태그 `OptCrowd/*`의 메모리가 약 10분 동안 어떻게 움직이는지 본 캡처입니다. 실제 메모리 추이가 설계(시분할 스폰, 한 번 확보한 뒤 재사용)와 맞는지 확인하는 용도입니다. LLM은 태그가 붙은 할당만 보여주고 있습니다.

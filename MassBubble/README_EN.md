@@ -1038,7 +1038,7 @@ This item depends on the engine's level-streaming and GC behavior, so it is not 
 - **Scope**: It is Standalone PIE, so the dedicated-server-only entries (`wp.Runtime.*`, ①) are not applied in this environment. The applied state in a server process is checked with `opt.stream.Dump`.
 
 ---
-## Instrumentation and Experiment Design
+## Instrumentation and Experiment Design ([Profiling Results](./Tools/Profiling.md))
 
 A consolidated tracking macro couples multiple profiling layers into a clean, single-statement interface.
 
