@@ -1059,9 +1059,9 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 
 | Tool | How to Use | What You Can See |
 |---|---|---|
-| Stat | Server `stat OptCrowd` · client `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble / PCG Plan Pump cycles, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` (screen example below) |
-| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*` and `Opt.Render.Update` scopes, Networking Insights (per-packet `CrowdBubble` / `AgentArray` bit counts, distinguishing the Iris · legacy replication path — captures in §7) |
-| Memory Insights | LLM tags `OptCrowd/*` (Memory trace in Unreal Insights) | Per-tag memory over time (`OptCrowd` · `OptCrowd/Entities` · `OptCrowd/Grids` · `OptCrowd/Bubble`), Alloc/Free event count (capture and analysis below) |
+| Stat | Server `stat OptCrowd` · client `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble / PCG Plan Pump cycles, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` ([Network Insights Analysis](#network-insights-analysis)) |
+| Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*` and `Opt.Render.Update` scopes, Networking Insights (per-packet `CrowdBubble` / `AgentArray` bit counts, distinguishing the Iris · legacy replication path — [Stat Screen](##stat-screen-example--stat-optcrowd--stat-optrender)) |
+| Memory Insights | LLM tags `OptCrowd/*` (Memory trace in Unreal Insights) | Per-tag memory over time (`OptCrowd` · `OptCrowd/Entities` · `OptCrowd/Grids` · `OptCrowd/Bubble`), Alloc/Free event count ([Memory Insights Graph Analysis](#memory-insights-graph-analysis)) |
 | CSV Profiler | `csvprofile start` / `csvprofile stop` | Categories `OptCrowd` (including `StreamingBusyCells`, `PlansPending` and `WanderClamped`) and `OptRender` (also works in Test builds) |
 | Log | `opt.crowd.Stats` | Count per region state (planning included), LOD tier distribution, viewer count, spawn / despawn queue lengths, snapshot region count, pending bot operations, PCG planner summary, WP busy cells · last GC summary, current switch values |
 | PCG Log | `opt.crowd.PCG.Stats` | Planner state (graph loading / ready / FAILED), queued and running counts, requested · ok · failed · timed out · cancelled counts, average / max latency |
@@ -1082,7 +1082,7 @@ Because PIE runs the server and client logic in one process, both groups appear 
 - **Replication scale**: `Bubble Items` is 400 (= the `MaxAgentsPerBubble` cap), and of those `Bubble Dirty Items` is 8–19. Only newly entered agents and agents that exceeded the dead-reckoning tolerance become update targets. The averages (53.33 / 1.52) look low because the bubble update happens only at `ReplicationHz` (10 Hz), which pulls the per-frame average down.
 - **Opt Render · client**: `Crowd Render Update` is 0.08 ms (max 0.18 ms), and `Agents Drawn` 400 agents are drawn with one ISM.
 
-### Memory Insights Graph Analysis — LLM Tags
+### Memory Insights Graph Analysis
 
 <p align="center">
   <img src="Image/MassBubble_MemoryInsight.PNG" alt="Memory Insights - memory over time of the LLM OptCrowd tags and Alloc/Free Event Count" width="1281"><br>
