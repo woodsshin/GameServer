@@ -18,6 +18,7 @@ DECLARE_CYCLE_STAT_EXTERN(TEXT("LOD Processor"),       STAT_OptCrowd_LOD,      S
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Movement Processor"),  STAT_OptCrowd_Move,     STATGROUP_OptCrowd, MASSBUBBLE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Snapshot Processor"),  STAT_OptCrowd_Snapshot, STATGROUP_OptCrowd, MASSBUBBLE_API);
 DECLARE_CYCLE_STAT_EXTERN(TEXT("Bubble Update"),       STAT_OptCrowd_Bubble,   STATGROUP_OptCrowd, MASSBUBBLE_API);
+DECLARE_CYCLE_STAT_EXTERN(TEXT("PCG Plan Pump"),       STAT_OptCrowd_Plan,     STATGROUP_OptCrowd, MASSBUBBLE_API);
 
 // Accumulators keep their value (set with SET_DWORD_STAT); counters are reset every frame (add with INC_DWORD_STAT_BY).
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Agents Alive"),            STAT_OptCrowd_Agents,      STATGROUP_OptCrowd, MASSBUBBLE_API);

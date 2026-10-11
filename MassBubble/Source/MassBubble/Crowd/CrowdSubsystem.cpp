@@ -4,6 +4,8 @@
 #include "Core/MassBubbleStreamingMonitor.h"
 #include "Crowd/CrowdFragments.h"
 #include "Crowd/CrowdMath.h"
+#include "Crowd/CrowdPCGPlanner.h"
+#include "Crowd/CrowdPlan.h"
 #include "Crowd/CrowdSettings.h"
 #include "Crowd/CrowdWander.h"
 #include "MassBubble.h"
@@ -50,12 +52,29 @@ void UCrowdSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	CachedRegionSizeCm = T.RegionSizeCm;
 	CachedGridCellSizeCm = T.GridCellSizeCm;
 
+	// Spawn plans: a PCG graph tells a new region where its agents start. The planner only exists while a graph is
+	// configured; without one (or with opt.crowd.PCG 0) regions are populated randomly, exactly as before.
+	if (T.bUsePCG)
+	{
+		UCrowdPCGPlanner* NewPlanner = NewObject<UCrowdPCGPlanner>(this);
+		if (NewPlanner->Initialize())
+		{
+			Planner = NewPlanner;
+		}
+	}
+
 	UE_LOG(LogMassBubble, Log, TEXT("CrowdSubsystem up (NetMode=%d). Region=%.0fcm, ActiveRadius=%d, AgentsPerRegion=%d, ReplicationHz=%.1f"),
 		static_cast<int32>(GetWorld()->GetNetMode()), T.RegionSizeCm, T.ActiveRegionRadius, T.AgentsPerRegion, T.ReplicationHz);
 }
 
 void UCrowdSubsystem::Deinitialize()
 {
+	if (Planner != nullptr)
+	{
+		Planner->Shutdown();
+		Planner = nullptr;
+	}
+
 	Regions.Empty();
 	RegionSlotByCoord.Empty();
 	SpawnQueue.Empty();
@@ -103,6 +122,9 @@ void UCrowdSubsystem::TickDirector(float DeltaSeconds)
 		RegionEvalAccumulator = 0.f;
 		EvaluateRegions(GetNow());
 	}
+
+	// Spawn plans (PCG graph runs) that finished since the last frame turn into spawn jobs. Cheap when nothing is pending.
+	PumpPlans();
 
 	// Structural changes (create / destroy) are only legal while Mass is not processing.
 	if (!EntityManager->IsProcessing())
@@ -329,10 +351,12 @@ void UCrowdSubsystem::EvaluateRegions(double Now)
 		BeginSpawn(Regions[Item.Value]);
 	}
 
-	// Regions nobody wants any more: despawn after a grace period (hysteresis against boundary flicker).
+	// Regions nobody wants any more: despawn after a grace period (hysteresis against boundary flicker). A region that is
+	// still waiting for its spawn plan has nothing to despawn: after the same grace period its plan is cancelled instead.
 	for (FCrowdRegion& Region : Regions)
 	{
-		if (Region.State != ECrowdRegionState::Active || WantedScratch.Contains(Region.Coord))
+		const bool bLive = Region.State == ECrowdRegionState::Active || Region.State == ECrowdRegionState::Planning;
+		if (!bLive || WantedScratch.Contains(Region.Coord))
 		{
 			continue;
 		}
@@ -342,19 +366,179 @@ void UCrowdSubsystem::EvaluateRegions(double Now)
 		}
 		else if (Now - Region.UnwantedSince >= T.RegionDeactivateDelaySec)
 		{
-			BeginDespawn(Region);
+			if (Region.State == ECrowdRegionState::Active)
+			{
+				BeginDespawn(Region);
+			}
+			else
+			{
+				CancelPlan(Region);
+			}
 		}
 	}
 }
 
 void UCrowdSubsystem::BeginSpawn(FCrowdRegion& Region)
 {
+	// A region whose population is known (persisted agents, or a plan that placed nobody) is restored as it is.
+	if (Region.bPlanned || Region.Saved.Num() > 0)
+	{
+		StartSpawning(Region);
+		return;
+	}
+
+	// Never populated: ask the PCG graph where the agents start. The region waits in Planning until the answer arrives.
+	if (CanPlanWithPCG())
+	{
+		BeginPlan(Region);
+		return;
+	}
+
+	// No PCG: generate the crowd deterministically from the region seed (CrowdWander::InitNewAgent).
+	StartSpawning(Region);
+}
+
+void UCrowdSubsystem::StartSpawning(FCrowdRegion& Region)
+{
 	const FCrowdTuning& T = GetCrowdTuning();
 	Region.State = ECrowdRegionState::Spawning;
 	Region.SpawnCursor = 0;
-	// Restore the persisted population if there is one, otherwise generate it deterministically from the seed.
-	Region.SpawnTarget = Region.Saved.Num() > 0 ? Region.Saved.Num() : T.AgentsPerRegion;
+	// Restore the persisted / planned population if there is one, otherwise generate it deterministically from the seed.
+	Region.SpawnTarget = (Region.bPlanned || Region.Saved.Num() > 0) ? Region.Saved.Num() : T.AgentsPerRegion;
 	SpawnQueue.Add(Region.Slot);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Spawn plans (PCG): where the agents of a region that was never populated start
+// ------------------------------------------------------------------------------------------------
+
+bool UCrowdSubsystem::CanPlanWithPCG() const
+{
+	return CrowdCVars::PCG != 0 && Planner != nullptr && Planner->IsEnabled();
+}
+
+void UCrowdSubsystem::BeginPlan(FCrowdRegion& Region)
+{
+	const FCrowdTuning& T = GetCrowdTuning();
+
+	Region.State = ECrowdRegionState::Planning;
+
+	FCrowdPlanRequest Request;
+	Request.Coord = Region.Coord;
+	Request.Min = CrowdMath::RegionMin(Region.Coord, T.RegionSizeCm);
+	Request.SizeCm = T.RegionSizeCm;
+	Request.Seed = Region.Seed;
+	Request.MaxAgents = T.AgentsPerRegion;
+	Planner->Request(Request);
+}
+
+void UCrowdSubsystem::CancelPlan(FCrowdRegion& Region)
+{
+	if (Planner != nullptr)
+	{
+		Planner->Cancel(Region.Coord);
+	}
+
+	// Nothing was created and nothing is persisted: the region simply goes back to waiting for a viewer.
+	Region.State = ECrowdRegionState::Inactive;
+	Region.UnwantedSince = -1.0;
+}
+
+void UCrowdSubsystem::PumpPlans()
+{
+	if (Planner == nullptr)
+	{
+		return;
+	}
+
+	OPT_SCOPE(STAT_OptCrowd_Plan, Plan, "Opt.Crowd.Plan");
+
+	Planner->Pump(FPlatformTime::Seconds());
+
+	FCrowdPlanResult Result;
+	while (Planner->PopResult(Result))
+	{
+		const int32* Slot = RegionSlotByCoord.Find(Result.Coord);
+		if (Slot == nullptr)
+		{
+			continue;
+		}
+
+		FCrowdRegion& Region = Regions[*Slot];
+		if (Region.State != ECrowdRegionState::Planning)
+		{
+			continue; // cancelled while its graph was running
+		}
+		ApplyPlan(Region, Result);
+	}
+
+	CSV_CUSTOM_STAT(OptCrowd, PlansPending, Planner->GetNumPending(), ECsvCustomStatOp::Set);
+
+	// Cumulative values: Run-AB.ps1 reads the LAST row of the capture (plans finished, failed, latency from request to answer).
+	CSV_CUSTOM_STAT(OptCrowd, PlansOk, Planner->GetNumOk(), ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, PlansFailed, Planner->GetNumFailed(), ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, PlanLatencyAvgMs, static_cast<float>(1000.0 * Planner->GetAvgLatencySec()), ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, PlanLatencyMaxMs, static_cast<float>(1000.0 * Planner->GetMaxLatencySec()), ECsvCustomStatOp::Set);
+}
+
+void UCrowdSubsystem::ApplyPlan(FCrowdRegion& Region, FCrowdPlanResult& Result)
+{
+	const FCrowdTuning& T = GetCrowdTuning();
+
+	if (Result.Status != ECrowdPlanStatus::Ok)
+	{
+		// The planner already logged why. Fall back to the plain random crowd (StartSpawning generates it from the region
+		// seed), or leave the region empty if the project asks for that.
+		if (!T.bPCGFallbackToRandom)
+		{
+			Region.bPlanned = true;
+			Region.Saved.Reset();
+		}
+		StartSpawning(Region);
+		return;
+	}
+
+	const FVector2D Min = CrowdMath::RegionMin(Region.Coord, T.RegionSizeCm);
+	const CrowdWander::FBox2 Home{ Min, Min + FVector2D(T.RegionSizeCm, T.RegionSizeCm) };
+
+	// The plan becomes the region's persisted population: from here on it is spawned by exactly the code that restores
+	// a despawned region (MakeAgent returns Saved[Index]).
+	const CrowdPlan::FBuildStats Stats = CrowdPlan::BuildAgents(
+		Result.Points, Home, Region.Seed, T.AgentsPerRegion, T.bPCGUsePointYaw, T, NextNetId, Region.Saved);
+
+	// Saved is the truth now, even if the graph left this region empty.
+	Region.bPlanned = true;
+
+	UE_LOG(LogMassBubble, Verbose, TEXT("[Crowd] region (%d,%d) planned: %d points -> %d agents (%d off open ground, %d without density, %d not finite, %d thinned to the cap) after %.0f ms"),
+		Region.Coord.X, Region.Coord.Y, Stats.Received, Stats.Created, Stats.OffGround, Stats.NoDensity, Stats.NotFinite, Stats.Thinned,
+		Result.LatencySec * 1000.0);
+
+	StartSpawning(Region);
+}
+
+FString UCrowdSubsystem::GetPlannerSummary() const
+{
+	if (Planner == nullptr)
+	{
+		return TEXT("pcg: off (no spawn graph configured, or 'Use PCG' is off in the settings)");
+	}
+	return Planner->GetDebugSummary();
+}
+
+int32 UCrowdSubsystem::ForgetInactivePlans()
+{
+	int32 Count = 0;
+	for (FCrowdRegion& Region : Regions)
+	{
+		if (Region.State != ECrowdRegionState::Inactive || (!Region.bPlanned && Region.Saved.Num() == 0))
+		{
+			continue;
+		}
+		Region.bPlanned = false;
+		Region.Saved.Reset();
+		++Count;
+	}
+	return Count;
 }
 
 void UCrowdSubsystem::BeginDespawn(FCrowdRegion& Region)
@@ -696,21 +880,28 @@ int32 UCrowdSubsystem::GetNumRegionsInState(ECrowdRegionState State) const
 
 FString UCrowdSubsystem::GetDebugSummary() const
 {
-	return FString::Printf(TEXT("crowd: regions spawning=%d despawning=%d | queues spawn=%d despawn=%d | snapshot regions=%d | bot ops pending=%d"),
-		GetNumRegionsInState(ECrowdRegionState::Spawning), GetNumRegionsInState(ECrowdRegionState::Despawning),
-		SpawnQueue.Num(), DespawnQueue.Num(), GetNumSnapshotRegions(), GetNumPendingBotOps());
+	return FString::Printf(TEXT("crowd: regions planning=%d spawning=%d despawning=%d | queues spawn=%d despawn=%d | pcg plans pending=%d | snapshot regions=%d | bot ops pending=%d"),
+		GetNumRegionsInState(ECrowdRegionState::Planning), GetNumRegionsInState(ECrowdRegionState::Spawning),
+		GetNumRegionsInState(ECrowdRegionState::Despawning),
+		SpawnQueue.Num(), DespawnQueue.Num(), Planner != nullptr ? Planner->GetNumPending() : 0,
+		GetNumSnapshotRegions(), GetNumPendingBotOps());
 }
 
 void UCrowdSubsystem::DumpStats() const
 {
-	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] viewers=%d regions(total=%d active=%d spawning=%d despawning=%d inactive=%d) alive=%d"),
+	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] viewers=%d regions(total=%d active=%d planning=%d spawning=%d despawning=%d inactive=%d) alive=%d"),
 		Viewers.Num(), Regions.Num(),
-		GetNumRegionsInState(ECrowdRegionState::Active), GetNumRegionsInState(ECrowdRegionState::Spawning),
+		GetNumRegionsInState(ECrowdRegionState::Active), GetNumRegionsInState(ECrowdRegionState::Planning),
+		GetNumRegionsInState(ECrowdRegionState::Spawning),
 		GetNumRegionsInState(ECrowdRegionState::Despawning), GetNumRegionsInState(ECrowdRegionState::Inactive),
 		AliveAgents);
 	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] LOD tiers: High=%d Medium=%d Low=%d Off=%d | spawnQueue=%d despawnQueue=%d snapshotSerial=%u"),
 		TierCounts[0], TierCounts[1], TierCounts[2], TierCounts[3], SpawnQueue.Num(), DespawnQueue.Num(), SnapshotSerial);
 	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] %s"), *GetDebugSummary());
+	if (Planner != nullptr)
+	{
+		UE_LOG(LogMassBubble, Log, TEXT("[Crowd] %s"), *Planner->GetDebugSummary());
+	}
 	if (const UMassBubbleStreamingMonitor* StreamMonitor = Monitor.Get())
 	{
 		UE_LOG(LogMassBubble, Log, TEXT("[Crowd] %s"), *StreamMonitor->GetDebugSummary());

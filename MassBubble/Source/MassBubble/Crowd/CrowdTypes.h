@@ -80,6 +80,14 @@ struct FCrowdTuning
 	int32 StructuralBatchSize = 64;        // agents per create / destroy call, the clock is checked between calls
 	float SnapshotMarginCm = 2000.f;       // regions this far outside a player's bubble are still snapshotted
 
+	// --- PCG spawn plans (see Crowd/CrowdPCGPlanner.h, UCrowdSettings category "PCG") ---
+	bool bUsePCG = true;                   // ask a PCG graph where the agents of a region that was never populated start
+	int32 PCGMaxConcurrent = 2;            // graph runs in flight at the same time
+	float PCGTimeoutSec = 20.f;            // a graph run that takes longer than this is given up
+	float PCGBoundsHalfHeightCm = 10000.f; // generation bounds of a run: the region, this far above and below AgentGroundZ
+	bool bPCGUsePointYaw = false;          // initial heading from the rotation of the PCG point (default: random per agent)
+	bool bPCGFallbackToRandom = true;      // a failed run populates the region randomly instead of leaving it empty
+
 	// --- Derived ---
 	int32 CellsPerSide = 8;
 

@@ -8,12 +8,15 @@
 #include "Crowd/CrowdCellGrid.h"
 #include "CrowdSubsystem.generated.h"
 
+struct FCrowdPlanResult;
 class AActor;
+class UCrowdPCGPlanner;
 class UMassBubbleStreamingMonitor;
 
 enum class ECrowdRegionState : uint8
 {
 	Inactive,   // no entities, only the persisted compact state
+	Planning,   // never populated: waiting for its spawn plan (a PCG graph run), no entities yet
 	Spawning,   // entities are being created in slices (budgeted per frame)
 	Active,     // fully populated and simulated
 	Despawning, // state is being persisted and entities destroyed in slices
@@ -42,6 +45,12 @@ struct FCrowdRegion
 	TArray<FMassEntityHandle> Entities;
 	/** Persisted state. While Spawning it is the restore source, while Despawning it is being filled. */
 	TArray<FCrowdSavedAgent> Saved;
+
+	/**
+	 * True once a spawn plan (PCG) decided the population of this region. From then on Saved is the truth, even when it
+	 * is empty: a region the graph left empty stays empty instead of being filled randomly the next time it is wanted.
+	 */
+	bool bPlanned = false;
 
 	int32 SpawnCursor = 0;
 	int32 SpawnTarget = 0;
@@ -143,11 +152,26 @@ public:
 	/** Forces a snapshot on the next processor run (used by tests and the stats command). */
 	void RequestSnapshot() { bSnapshotDue = true; }
 
+	/** One line about the PCG spawn planner: graph, queue, runs in flight, results, latency. */
+	FString GetPlannerSummary() const;
+
+	/**
+	 * Forgets the planned / persisted population of every region that is not active, so that the next visit generates it
+	 * again (opt.crowd.PCG.Replan, after editing the PCG graph). Returns how many regions were reset.
+	 */
+	int32 ForgetInactivePlans();
+
 private:
 	void RefreshViewers();
 	void EvaluateRegions(double Now);
 	int32 FindOrAddRegion(const FIntPoint& Coord);
 	void BeginSpawn(FCrowdRegion& Region);
+	void StartSpawning(FCrowdRegion& Region);
+	void BeginPlan(FCrowdRegion& Region);
+	void CancelPlan(FCrowdRegion& Region);
+	void PumpPlans();
+	void ApplyPlan(FCrowdRegion& Region, FCrowdPlanResult& Result);
+	bool CanPlanWithPCG() const;
 	void BeginDespawn(FCrowdRegion& Region);
 	int32 SpawnSlice(FCrowdRegion& Region, int32 Budget);
 	int32 DespawnSlice(FCrowdRegion& Region, int32 Budget);
@@ -171,6 +195,10 @@ private:
 
 	/** Tells us whether World Partition is busy (spawn / despawn budgets shrink then). Null in commandlets. */
 	TWeakObjectPtr<UMassBubbleStreamingMonitor> Monitor;
+
+	/** Answers "where do the agents of a new region start?" with a PCG graph. Null when no graph is configured. */
+	UPROPERTY(Transient)
+	TObjectPtr<UCrowdPCGPlanner> Planner;
 
 	struct FBotJob
 	{

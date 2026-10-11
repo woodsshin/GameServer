@@ -19,6 +19,7 @@ namespace CrowdCVars
 	int32 SnapshotScope = 1;
 	float BotRampIntervalSec = -1.f;
 	int32 BotActivateCells = 1;
+	int32 PCG = 1;
 
 	static FAutoConsoleVariableRef CVarEnable(
 		TEXT("opt.crowd.Enable"), Enable,
@@ -63,6 +64,10 @@ namespace CrowdCVars
 	static FAutoConsoleVariableRef CVarBotActivateCells(
 		TEXT("opt.crowd.BotActivateCells"), BotActivateCells,
 		TEXT("Bots created afterwards: 1 = their World Partition source ACTIVATES cells (BeginPlay, tick, registration: like a player). 0 = only LOADS them (cheap, enough for the crowd)."), ECVF_Default);
+
+	static FAutoConsoleVariableRef CVarPCG(
+		TEXT("opt.crowd.PCG"), PCG,
+		TEXT("1: a region that was never populated asks the PCG spawn graph where its agents start (needs a graph in the settings). 0: plain random placement. Regions that already have a population keep it."), ECVF_Default);
 }
 
 UCrowdSettings::UCrowdSettings()
@@ -144,6 +149,13 @@ namespace
 		Out.DespawnBudgetBusyMs = FMath::Clamp(S.DespawnBudgetBusyMs, 0.f, Out.DespawnBudgetMs);
 		Out.StructuralBatchSize = FMath::Clamp(S.StructuralBatchSize, 8, 2048);
 		Out.SnapshotMarginCm = FMath::Max(S.SnapshotMarginCm, 0.f);
+
+		Out.bUsePCG = S.bUsePCG;
+		Out.PCGMaxConcurrent = FMath::Clamp(S.PCGMaxConcurrent, 1, 16);
+		Out.PCGTimeoutSec = FMath::Max(S.PCGTimeoutSec, 1.f);
+		Out.PCGBoundsHalfHeightCm = FMath::Max(S.PCGBoundsHalfHeightCm, 100.f);
+		Out.bPCGUsePointYaw = S.bPCGUsePointYaw;
+		Out.bPCGFallbackToRandom = S.bPCGFallbackToRandom;
 
 		Out.BotOrbitRadiusCm = FMath::Max(S.BotOrbitRadiusCm, 1000.f);
 		Out.BotSpeedCmPerSec = FMath::Max(S.BotSpeedCmPerSec, 0.f);

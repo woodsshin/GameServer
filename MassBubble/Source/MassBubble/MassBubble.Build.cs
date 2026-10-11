@@ -29,6 +29,10 @@ public class MassBubble : ModuleRules
 		{
 			"MassCommon",
 			"MassSimulation",
+
+			// Spawn plans: a PCG graph decides where the agents of a region start (Crowd/CrowdPCGPlanner.cpp).
+			// The PCG plugin has to be enabled in the .uproject.
+			"PCG",
 		});
 
 		SetupIrisSupport(Target);

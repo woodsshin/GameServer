@@ -151,6 +151,13 @@ void UMassBubbleStreamingMonitor::Tick(float DeltaTime)
 	ScheduleQuietGC(Now);
 
 	CSV_CUSTOM_STAT(OptCrowd, StreamingBusyCells, NumBusyCells, ECsvCustomStatOp::Set);
+
+	// GC visibility for Run-AB.ps1 (GC_* cases). GCCount is cumulative (the script takes last - first of the window).
+	// GCSpanMs is pre-GC -> post-GC wall time of the last GC. With incremental reachability the GC spreads over several
+	// frames, so this is the length of the whole cycle, NOT the time the game thread was blocked: that is
+	// Exclusive/GameThread/GarbageCollection in the same CSV.
+	CSV_CUSTOM_STAT(OptCrowd, GCCount, static_cast<int32>(NumGCs), ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, GCSpanMs, static_cast<float>(LastGCDurationSec * 1000.0), ECsvCustomStatOp::Set);
 }
 
 void UMassBubbleStreamingMonitor::LogHitchIfAny(float DeltaTime)

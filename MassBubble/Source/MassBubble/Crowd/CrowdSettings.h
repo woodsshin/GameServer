@@ -5,6 +5,8 @@
 #include "Crowd/CrowdTypes.h"
 #include "CrowdSettings.generated.h"
 
+class UPCGGraphInterface;
+
 /**
  * Designer-facing tunables (Project Settings > Game > MassBubble Crowd, stored in DefaultGame.ini).
  * Processors never touch this UObject directly: they read the POD FCrowdTuning copy (GetCrowdTuning()).
@@ -26,6 +28,10 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Regions", meta = (ClampMin = "1", ClampMax = "8"))
 	int32 ActiveRegionRadius = 2;
 
+	/**
+	 * Agents per region. With a PCG spawn graph (category "PCG") this is the CAP: the graph decides where agents start
+	 * and how many there are, a region gets at most this many (the surplus is thinned out uniformly).
+	 */
 	UPROPERTY(Config, EditAnywhere, Category = "Regions", meta = (ClampMin = "1", ClampMax = "5000"))
 	int32 AgentsPerRegion = 400;
 
@@ -46,6 +52,44 @@ public:
 
 	UPROPERTY(Config, EditAnywhere, Category = "Regions")
 	int32 WorldSeed = 1337;
+
+	// ---- PCG spawn plans (Crowd/CrowdPCGPlanner.h) ----
+	/**
+	 * Ask a PCG graph where the agents of a region that was never populated start, instead of placing them at random.
+	 * Read when the world starts (it decides whether the planner and its graph are loaded at all); while it is on,
+	 * opt.crowd.PCG 0 / 1 switches it at runtime (A/B measurements). Without a Spawn Graph this has no effect.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG")
+	bool bUsePCG = true;
+
+	/**
+	 * The graph that produces the start points of ONE region. It runs once per region, on a transient actor whose bounds are
+	 * the region, with the region seed as PCG seed (same region = same points). It must end in POINT data on its Output node.
+	 * Only X / Y of the points are used (agents walk on AgentGroundZ); points with a density of 0 or less and points in the
+	 * band along the region border are ignored. No spawner nodes: the graph only delivers points.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG", meta = (EditCondition = "bUsePCG"))
+	TSoftObjectPtr<UPCGGraphInterface> SpawnGraph;
+
+	/** Graph runs of different regions that may be in flight at the same time. */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG", meta = (EditCondition = "bUsePCG", ClampMin = "1", ClampMax = "16"))
+	int32 PCGMaxConcurrent = 2;
+
+	/** A graph run that takes longer than this (seconds, counted from its start) is given up. */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG", meta = (EditCondition = "bUsePCG", ClampMin = "1"))
+	float PCGTimeoutSec = 20.f;
+
+	/** Height of the generation bounds above and below AgentGroundZ. Matters for graphs that sample landscape or meshes. */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG", meta = (EditCondition = "bUsePCG", ClampMin = "100"))
+	float PCGBoundsHalfHeightCm = 10000.f;
+
+	/** Start every agent facing the way its PCG point is rotated. Off: a random heading per agent (from the region seed). */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG", meta = (EditCondition = "bUsePCG"))
+	bool bPCGUsePointYaw = false;
+
+	/** A graph run that fails or times out populates the region randomly. Off: the region stays empty. */
+	UPROPERTY(Config, EditAnywhere, Category = "PCG", meta = (EditCondition = "bUsePCG"))
+	bool bPCGFallbackToRandom = true;
 
 	// ---- LOD ----
 	UPROPERTY(Config, EditAnywhere, Category = "LOD", meta = (ClampMin = "100"))
@@ -211,6 +255,7 @@ namespace CrowdCVars
 	extern MASSBUBBLE_API int32 SnapshotScope;       // opt.crowd.SnapshotScope     0 = snapshot every live region
 	extern MASSBUBBLE_API float BotRampIntervalSec;  // opt.crowd.BotRampSec        >= 0 overrides the setting, 0 = all bots at once
 	extern MASSBUBBLE_API int32 BotActivateCells;    // opt.crowd.BotActivateCells  1 = bots stream cells as "Activated" (default: "Loaded")
+	extern MASSBUBBLE_API int32 PCG;                 // opt.crowd.PCG               0 = never ask PCG, populate new regions randomly
 }
 
 /** Immutable-per-frame tuning snapshot. Safe to read from any thread; rebuilt only via ReloadCrowdTuning(). */

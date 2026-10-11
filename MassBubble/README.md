@@ -1,4 +1,4 @@
-# MassBubble - World Partition + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
+# MassBubble - World Partition + PCG + Mass Entity 멀티플레이 최적화 (UE 5.8, C++)
 
 **Unreal Engine 5.8 데디케이티드 대규모 서버 최적화 샘플**
 
@@ -8,7 +8,7 @@
 ![Target](https://img.shields.io/badge/Target-Dedicated%20Server-2ea44f)
 ![Framework](https://img.shields.io/badge/Framework-Mass%20Entity-orange)
 ![Replication](https://img.shields.io/badge/Replication-Push%20Model%20%2B%20FastArray-blue)
-![Automation Tests](https://img.shields.io/badge/Automation%20Tests-4-success)
+![Automation Tests](https://img.shields.io/badge/Automation%20Tests-17-success)
 
 ---
 
@@ -36,10 +36,10 @@ NPC 규모가 커져도 아래 네 가지 비용이 모두 **관측 가능한 �
 |---|---|---|
 | 서버 CPU · 시뮬레이션 | NPC마다 Actor/Component Tick, 전원을 매 프레임 갱신 | Mass chunk 단위 연속된 배열로 처리, 거리 기반 LOD + time-slicing, 병렬 chunk 처리 |
 | 서버 CPU · 대역폭 · 복제 | NPC마다 ActorChannel, 프로퍼티 비교, 풀 상태 전송 | **플레이어당 Actor 1개**, Push Model, FastArray delta, Dead reckoning, 10 B 양자화 레코드 |
-| 서버 · World Partition 스트리밍 | 셀 로드 / 언로드 직후 엔진이 강제하는 GC, 같은 프레임에 겹치는 NPC 일괄 spawn / despawn | 엔진 streaming 시간 제한 프로파일, **Quiet GC**, WP 고부하 구간 spawn / despawn 예산 축소, Hitch 로그 |
+| 서버 · World Partition 스트리밍 | 셀 로드 / 언로드 직후 엔진이 강제하는 GC, 같은 프레임에 겹치는 NPC 일괄 spawn / despawn | 엔진 streaming 시간 제한 프로파일, **Quiet GC**, **Incremental GC**, WP 고부하 구간 spawn / despawn 시분할 처리 시간 축소, Hitch 로그 |
 | 클라이언트 · 렌더링 | NPC마다 Actor + Component + Draw call | **ISM 1개**, 프레임당 batch update 1회 |
 
-**Non-goals** : AI(행동 트리 · 길찾기 · 충돌 회피), 애니메이션, 외부 저장소 저장, 안티치트는 범위 밖입니다. NPC 로직은 의도적으로 단순하게 움직이며, 최적화 대상 파이프라인(시뮬레이션 → 스냅샷 → 복제 → 렌더)을 검증하기 위한 워크로드 역할만 합니다.
+**Non-goals** : AI(행동 트리 · 길찾기 · 충돌 회피), 애니메이션, 외부 저장소 저장, 안티치트는 범위 밖입니다. NPC 로직은 의도적으로 단순하게 움직이며, 최적화 대상 파이프라인(시뮬레이션 → 스냅샷 → 복제 → 렌더)을 검증하기 위한 워크로드 역할만 합니다. 다만 새 region의 시작 위치는 PCG 그래프로 정할 수 있습니다 ([PCG 스폰 계획](#3-pcg-스폰-계획)).
 
 ---
 
@@ -48,19 +48,20 @@ NPC 규모가 커져도 아래 네 가지 비용이 모두 **관측 가능한 �
 | 영역 | 접근 방식 | 효과 | 주요 파일 |
 |---|---|---|---|
 | 시뮬레이션 | 접근 패턴 단위 fragment 분리, 단일 Archetype, **LOD를 값(fragment)으로 저장** | 데이터 연속 배치를 통해 캐시 미스를 방지, LOD 변경 시 메모리 재배치 연산 부하로 인한 **구조적 성능 저하**(Structural Change)를 근본적으로 차단 | `CrowdFragments.h` |
-| 시뮬레이션 | 거리 기반 **LOD + time-slicing** (1 / 2 / 6 / 0 프레임) + 보정(hysteresis) | 기본 설정 · 뷰어 1명 기준 실제 이동 연산 횟수를 크게 감소 **≈ 830 / 10,000** (해석적 추정) | `CrowdProcessors.cpp`, `CrowdMath.h` |
+| 시뮬레이션 | 거리 기반 **LOD + time-slicing** (1 / 2 / 6 / 0 프레임) + 보정(hysteresis) | 기본 설정 · 뷰어 1명 · region당 400개(랜덤 배치) 기준 실제 이동 연산 횟수를 크게 감소 **≈ 830 / 10,000** (해석적 추정) | `CrowdProcessors.cpp`, `CrowdMath.h` |
 | 시뮬레이션 | 개체별 병렬 처리(`ParallelForEachEntityChunk`) 및 로컬 영역 내 독립적인 데이터 기록 | Worker thread 분산, lock 불필요 | `CrowdProcessors.cpp` |
 | 스트리밍 | Region 소유 상태 및 실시간 제한 기준 처리 + 부하 발생 시 생성/소멸 축소 + **결정론적 복구** | WP 셀 unload/reload와 무관, spawn으로 인한 프레임 드랍 방지 | `CrowdSubsystem.cpp` |
-| 스트리밍 | **WP 로딩 / 언로딩 순간 버벅임(Hitch) 방지** + 엔진 streaming CVar 프로파일 + 고부하 셀 감시 + **Quiet GC** | 셀 로드 / 제거 중에는 GC · NPC 구조 변경을 미루고 엔진 작업은 프레임에 분산, Hitch 원인(GC / WP / crowd)을 로그로 구분 | `MassBubbleStreamingMonitor.cpp`, `MassBubbleRuntimeConfig.cpp` |
+| 스폰 계획 | **UCrowdPCGPlanner 기반 새 region 생성 위치 결정** (`UCrowdPCGPlanner`) + `CrowdPlan::BuildAgents`를 Point의 에이전트 변환 | 디자이너 설정 밀도 및 분포 기반 서버 인구(Population) 초기 상태. 기존 리전 스케줄러를 통한 스폰 시점·예산·영속성 관리 (PCG는 데이터 생성기 역할). 시분할 스폰 및 결정론적 복구 시스템과의 연동. PCG 그래프 실패 시 랜덤 배치 폴백. | `CrowdPCGPlanner.cpp`, `CrowdPCGHost.cpp`, `CrowdPlan.h` |
+| 스트리밍 | **WP 로딩 / 언로딩 순간 버벅임(Hitch) 방지** + 엔진 streaming CVar 프로파일 + 고부하 셀 감시 + **Quiet GC** + **Incremental GC** | 셀 로드 / 제거 중에는 GC · NPC 구조 변경을 미루고 엔진 작업과 GC 자체는 프레임에 분산, Hitch 원인(GC / WP / crowd)을 로그로 구분 | `MassBubbleStreamingMonitor.cpp`, `MassBubbleRuntimeConfig.cpp` |
 | 공간 탐색 | Region별 균일 격자 + **계수 정렬**(counting sort) 기반으로 재배치 | 연산 속도 최적화 O(N + cells), 초기 구동 이후 재할당 없음, 전체 맵 크기와 무관하게 안정적인 성능 유지 | `CrowdCellGrid.h` |
 | 공간 탐색 | 실제 플레이어의 bubble에 닿는 region만 snapshot | 봇 전용 region은 grid 구축(복사 + counting sort) 생략 | `CrowdSubsystem.cpp` |
 | 복제 | **플레이어당 Actor 1개로 제한** (`bOnlyRelevantToOwner` + `COND_OwnerOnly`) + **Push Model** | NPC당 ActorChannel 제거, 변경 사항(Dirty)이 없을 경우 데이터 비교 연산 비용을 0으로 최적화 | `CrowdBubble.cpp` |
 | 복제 | 데이터 정밀도 축소(**데이터 경량화/양자화**) 및 200m 격자 기준 **좌표 재설정**(Origin Rebasing) | agent당 **10 B** (기존 52 B 대비 −81%) | `CrowdNetMath.h` |
-| 복제 | **Dead reckoning** (거리별 허용 오차) | 등속 직진 운동을 하는 에이전트는 네트워크 재전송 횟수 0회를 보장, 데드 레코닝 활성화 시 총 메시지 송신량이 기존 대비 **15% 미만**으로 감소 | `CrowdNetMath.h`, `CrowdTests.cpp` |
+| 복제 | **Dead reckoning** (거리별 허용 오차) | 등속 직진 에이전트는 heartbeat(2초) 사이에 재전송 0회, 데드 레코닝 활성화 시 총 메시지 송신량이 기존 대비 **15% 미만**으로 감소 | `CrowdNetMath.h`, `CrowdTests.cpp` |
 | 복제 | **Iris / legacy 겸용** FastArray | 동일한 빌드 환경에서 전송 옵션 설정을 통해 성능 및 호환성을 비교. Network Insights에서 두 경로 모두 클라이언트로 `AgentArray`가 복제되는 것을 확인 | `CrowdBubble.cpp`, `MassBubbleRuntimeConfig.cpp` |
-| 클라이언트 | 외삽 + 지수 보간 + **ISM 1개 batch update** | 400 agent = Actor 1 / Render State 및 Draw Call 최적화 | `CrowdRenderSubsystem.cpp` |
+| 클라이언트 | 외삽 + **smoothing**(속도 이징 · 위치 보정 · yaw) + **ISM 1개 batch update** | 400 agent = Actor 1 / Render State 및 Draw Call 최적화 | `CrowdRenderSubsystem.cpp` |
 | 빌드 | **`ClientOnly` 모듈 분리** | 서버 타깃에 렌더 모듈이 포함되지 않음 | `MassBubble*.Target.cs` |
-| 검증 | CVar 킬스위치, stat / CSV / Insights 통합 계측, **Hitch 로그**, Automation Test 4종 | 최적화를 측정하고 성능 검증, Hitch는 원인별로 구분 | `CrowdSettings.cpp`, `MassBubbleStats.h`, `MassBubbleStreamingMonitor.cpp`, `CrowdTests.cpp` |
+| 검증 | CVar 킬스위치, stat / CSV / Insights 통합 계측, **Hitch 로그**, Automation Test 17종 | 최적화를 측정하고 성능 검증, Hitch는 원인별로 구분 | `CrowdSettings.cpp`, `MassBubbleStats.h`, `MassBubbleStreamingMonitor.cpp`, `CrowdTests.cpp`, `CrowdPlanTests.cpp` |
 
 ---
 
@@ -74,7 +75,9 @@ flowchart TB
         DIR["UCrowdDirector<br/>game-thread driver"] --> SUB["UCrowdSubsystem<br/>regions / viewers / persisted state"]
         WPS["World Partition<br/>level streaming / GC"] -. "state change / GC delegates" .-> MON["UMassBubbleStreamingMonitor<br/>busy cells / quiet GC / hitch log"]
         MON -- "IsBusy() → spawn / despawn budget 축소" --> SUB
-        SUB -- "budgeted batch create / destroy" --> LOD
+        SUB -- "기존 일반 region<br/>budgeted batch create / destroy" --> LOD
+        SUB -- "신규 region<br/>Request / PopResult" --> PLN["UCrowdPCGPlanner<br/>queue / timeout / fallback"]
+        PLN -- "1 transient host per run" --> HOST["ACrowdPCGHost<br/>UPCGComponent (GenerateLocal)"]
         subgraph MASS["Mass - PrePhysics phase"]
             LOD["LOD Processor<br/>1/4 of agents per frame"] --> MOVE["Movement Processor<br/>time-sliced and parallel"]
             MOVE --> SNAP["Snapshot Processor<br/>at ReplicationHz"]
@@ -104,7 +107,7 @@ sequenceDiagram
     participant C as Client RenderSubsystem
     end
 
-    D->>D: RefreshViewers, EvaluateRegions (4 Hz), PumpRegionJobs
+    D->>D: RefreshViewers, EvaluateRegions (4 Hz), PumpPlans (PCG), PumpRegionJobs
     D->>D: mark snapshot due (ReplicationHz)
     M->>M: LOD → Move (parallel) → Snapshot (only when due)
     M-->>B: SnapshotSerial++
@@ -119,6 +122,7 @@ sequenceDiagram
 | 컴포넌트 | 실행 위치 | 근거 |
 |---|---|---|
 | `UCrowdDirector`, `UCrowdSubsystem` | Game thread | Entity create/destroy 같은 structural change는 Mass 처리 중에는 불가 → `IsProcessing()` 확인 후 실행 |
+| `UCrowdPCGPlanner`, `ACrowdPCGHost` | Game thread | 계획 큐 · host actor 생성 / 파괴 · 결과 수신이 모두 game thread에서 이뤄집니다. 그래프 실행 자체는 PCG 실행기가 처리하고 끝나면 delegate로 알려 주며, `UCrowdSubsystem::PumpPlans`가 매 프레임 확인합니다 |
 | `UMassBubbleStreamingMonitor` | Game thread (tickable world subsystem) | 레벨 스트리밍 상태 변경 · GC delegate가 game thread에서 호출됨. `UCrowdSubsystem`이 같은 thread에서 `IsBusy()`를 읽으므로 lock 불필요 |
 | `UCrowdLODProcessor` | Game thread (`bRequiresGameThreadExecution`) | Game-thread-only 서브시스템(뷰어 목록)에 접근 |
 | `UCrowdMovementProcessor` | Worker threads (`ParallelForEachEntityChunk`) | 자기 chunk 데이터만 쓰기, 설정은 불변 POD(Plain Old Data, 구조체) 스냅샷으로 읽기 |
@@ -130,9 +134,10 @@ sequenceDiagram
 
 - **서버만 원본 상태를 소유** : Mass entity는 서버 / standalone에서만 존재합니다 (`ExecutionFlags`, `ShouldCreateSubsystem`). 클라이언트는 양자화된 AOI 뷰만 가집니다.
 - **액터 외부 상태 분리** : NPC 상태의 소유자는 Actor가 아니라 Region(서버 서브시스템)입니다. World Partition 셀 스트리밍과 생명주기가 분리됩니다.
-- **고부하 작업은 스트리밍 유휴(Idle) 시점으로** : World Partition 셀이 로드 / 제거되는 동안에는 NPC spawn / despawn 예산을 줄이고, 셀 언로드 후 GC는 고부하 셀이 없어질 때 실행합니다. 서버의 한 프레임 지연은 모든 플레이어의 지연입니다.
+- **고부하 작업은 스트리밍 유휴(Idle) 시점으로** : World Partition 셀이 로드 / 제거되는 동안에는 NPC spawn / despawn 시분할 처리시간 줄이고, 셀 언로드 후 GC는 고부하 셀이 없어질 때 실행합니다. GC 자체도 Incremental GC로 여러 프레임에 나눕니다. 서버의 한 프레임 지연은 모든 플레이어의 지연입니다.
 - **최적화 항목마다 비활성화 수단(킬 스위치) 구현** : A/B 측정이 가능해야 최적화를 증명할 수 있습니다.
-- **순수 로직은 헤더 온리(Header-Only)로 구현** : `CrowdMath.h`, `CrowdCellGrid.h`, `CrowdNetMath.h`는 월드 · Mass · 네트워크 없이 단위 테스트됩니다.
+- **순수 로직은 헤더 온리(Header-Only)로 구현** : `CrowdMath.h`, `CrowdCellGrid.h`, `CrowdNetMath.h`, `CrowdWander.h`, `CrowdSmoothing.h`, `CrowdPlan.h`는 월드 · Mass · 네트워크 · PCG 없이 단위 테스트됩니다.
+- **PCG는 생성기이고, 스케줄러는 Region입니다** : PCG 그래프는 새 region의 시작 위치(점)만 돌려줍니다. 언제 populate할지 · 시분할 처리시간 · 영속은 `UCrowdSubsystem`이 그대로 맡으므로, PCG를 켜도 spawn / 복원 경로는 하나로 유지됩니다.
 - **유효하지 않은 상태는 설계 단계에서 원천 차단** : 설정값을 불변식에 맞게 clamp 합니다 (예: bubble 반경은 int16 안전 범위 이하).
 
 ---
@@ -143,7 +148,7 @@ sequenceDiagram
 agent는 단일 Archetype(`FCrowdAgentTag` + fragment 4종)으로 표현합니다. fragment를 **접근 패턴 단위**로 쪼개, LOD 패스는 `Location`을 읽어 `LOD`만 쓰고, 이동 패스는 `Location` · `Motion` · `PendingDelta`를 갱신하며, snapshot 패스는 전부 읽기 전용으로 접근합니다. Mass는 chunk 안에 fragment별 연속된 배열로 저장하므로 쓰지 않는 데이터가 캐시 라인을 오염시키지 않고, 프로세서의 읽기/쓰기 선언(`EMassFragmentAccess`)을 통해 안전한 병렬 처리를 위한 데이터 의존성 관계가 확립됩니다.
 
 ```cpp
-// Crowd/CrowdFragments.h (요약) — 합계 56 B / agent
+// Crowd/CrowdFragments.h (요약) — 합계 64 B / agent (+ entity handle 8 B = 72 B)
 struct FCrowdAgentTag : FMassTag
 {
 };
@@ -161,11 +166,13 @@ struct FCrowdLocationFragment : FMassFragment   // 16 B, double (LWC)
 	FVector2D Location;
 };
 
-struct FCrowdMotionFragment : FMassFragment   // 16 B
+struct FCrowdMotionFragment : FMassFragment   // 24 B
 {
 	FVector2f Velocity;
 	float RetargetTimer;
 	uint32 Rng;
+	float Heading;       // 마지막 걷기 구간의 방향 (멈춰 있는 동안에도 유지)
+	float CruiseSpeed;   // agent 고유의 순항 속도
 };
 
 struct FCrowdLODFragment : FMassFragment   //  8 B
@@ -184,26 +191,26 @@ struct FCrowdLODFragment : FMassFragment   //  8 B
 
 | 성능 평가 항목 | 측정 수치 및 명세 | 최적화 성과 및 기술적 의의 |
 | :--- | :--- | :--- |
-| **단일 아키타입 구성** | `0xFFC5A8E9` (1개로 통합) | LOD 단계를 Tag가 아닌 Fragment 값으로 설계하여 상태 변화 시 발생하는 **동적 아키타입 이동 연산(Structural Change)을 원천 차단**했습니다. |
-| **개체당 메모리 최적화** | **64 B** (Fragment 56B + Handle 8B) | 에이전트 정보를 64바이트 선형 구조로 압축하여 CPU 캐시 라인 친화적인 메모리 배치를 완성했습니다. |
-| **청크 점유율 (Occupancy)** | **99.2%** (평균 2,030.8 / 최대 2,047 Entity) | 128 KiB 크기의 청크(Chunk) 13개에 개체들을 빈틈없이 조밀하게 배치했습니다. |
-| **메모리 파편화 낭비율** | **단 0.637%** (약 14 KiB) | 일반적인 객체 지향 방식과 달리, 데이터 선형 배치를 통해 **메모리 낭비를 0%대에 가깝게 극한으로 억제**했습니다. |
-| **공간 복잡도 성능** | 구축: `O(N + cells)` / 질의: `O(방문 셀 + 에이전트)` | 복잡도를 최소화하고, 내부 배열을 `Reset()` 및 `EAllowShrinking::No`로 재사용하여 **초기 실행 이후 런타임 메모리 추가 할당 **이 없습니다. |
+| **단일 아키타입 구성** | `0x742BE11D` (1개로 통합) | LOD 단계를 Tag가 아닌 Fragment 값으로 설계하여 상태 변화 시 발생하는 **동적 아키타입 이동 연산(Structural Change)을 원천 차단**했습니다. 사용자(뷰어)가 늘어 agent가 늘어도 Archetype은 1개로 유지되고, 그 안의 Entity · Chunk 수만 늘어납니다. |
+| **개체당 메모리 최적화** | **72 B** (Fragment 64 B + Handle 8 B) | fragment 4종(16 + 16 + 24 + 8 B)에 entity handle 8 B를 더한 값입니다. Mass는 fragment별 연속 배열로 저장하므로 패스마다 필요한 fragment만 CPU 캐시에 올라옵니다. |
+| **청크 점유율 (Occupancy)** | **68.7%** (평균 1,250 / 최대 1,820 Entity) | Entity 10,000개가 128 KiB 청크(Chunk) 8개에 담겨 있습니다 (72 B × 1,820 ≈ 128 KiB). 점유율은 청크가 얼마나 찼는지에 따라 달라지는 값입니다. |
+| **메모리 파편화 낭비율** | **6.139%** (64.875 KiB) | 할당 1.031 MiB 중 낭비 64.875 KiB입니다. Entity 수에 따라 달라지는 값으로, 수가 적을 때 비율이 크게 나왔습니다. |
+| **공간 복잡도 성능** | 구축: `O(N + cells)` / 질의: `O(방문 셀 + 에이전트)` | 복잡도를 최소화하고, 내부 배열을 `Reset()` 및 `EAllowShrinking::No`로 재사용하여 **초기 실행 이후 런타임 메모리 추가 할당**이 없습니다. |
 | **네트워크 데이터 절감** | 개체당 데이터 **10B 압축** | 데이터 양자화 및 좌표 재설정(Origin Rebasing)을 통해 **기존 방식 대비 네트워크 송수신량을 약 81% 절감**했습니다. |
 
 에디터 PIE에서 Mass가 위 구성대로 동작하는지 Mass Debugger로 확인한 캡처입니다. 구성 확인용이며 성능 벤치마크가 아닙니다.
 
 <p align="center">
-  <img src="Image/MassDebugger_Archetypes.PNG" alt="Mass Debugger - Archetypes" width="781"><br>
-  <sub>Mass Debugger › Archetypes — <code>0xFFC5A8E9</code></sub>
+  <img src="Image/MassDebugger_Archetypes.PNG" alt="Mass Debugger - Archetypes" width="741"><br>
+  <sub>Mass Debugger › Archetypes — <code>0x742BE11D</code> · Entity 10,000 · Chunk 8</sub>
 </p>
 
 <p align="center">
-  <img src="Image/MassDebugger_Fragments.PNG" alt="Mass Debugger - Fragments" width="662"><br>
-  <sub>Mass Debugger › Fragments</sub>
+  <img src="Image/MassDebugger_Fragments.PNG" alt="Mass Debugger - Fragments" width="644"><br>
+  <sub>Mass Debugger › Fragments (<code>Coordinate Space</code> 변경 전 · Entity 1,600)</sub>
 </p>
 
-- **fragment 4종이 같은 entity 집합에 부착** : `Crowd Id` · `Location` · `Motion` · `LOD` Fragment 모두 Archetype 1개 / Entity 26,400개로 표시됩니다 (목록에 같은 행이 반복해서 나타나지만 값은 모두 같습니다).
+- **fragment 4종이 같은 entity 집합에 부착** : `Crowd Id` · `Location` · `Motion` · `LOD` Fragment 모두 같은 Archetype 1개에 붙어 있고, Entity 수는 Archetypes 탭과 같습니다.
 
 <p align="center">
   <img src="Image/MassDebugger_Entities.PNG" alt="Mass Debugger - Entities" width="776"><br>
@@ -235,9 +242,10 @@ NPC 상태의 소유자를 Actor가 아니라 서버 서브시스템의 **Region
 enum class ECrowdRegionState : uint8
 {
 	Inactive,   // 엔티티가 없으며, 보존된 압축 상태만 남음
+	Planning,   // 한 번도 populate된 적 없음: 스폰 계획(PCG 그래프 실행)을 기다리는 중, 엔티티 없음
 	Spawning,   // 엔티티가 슬라이스 단위로 생성되는 중 (프레임당 할당된 생성 제한에 맞춤)
 	Active,     // 엔티티가 배치가 완료되었고 시뮬레이션이 활성화된 상태
-	Despawning, // 상태를 파일에 저장하고 엔티티를 차례대로 소멸시키는 중
+	Despawning, // 압축 상태를 보존하고 엔티티를 차례대로 소멸시키는 중
 };
 ```
 
@@ -260,7 +268,7 @@ int32 Budget = T.MaxSpawnPerFrame;                                             /
 bool bDidWork = false;
 while (Budget > 0 && SpawnQueue.Num() > 0)
 {
-	// 프레임당 최소 1 batch는 항상 진행하고, 예산을 넘기면 다음 프레임으로 넘깁니다.
+	// 프레임당 최소 1 batch는 항상 진행하고, 시분할 처리시간을 넘기면 다음 프레임으로 넘깁니다.
 	if (bBudgeted && bDidWork && FPlatformTime::Seconds() >= Deadline)
 	{
 		break;
@@ -282,13 +290,82 @@ while (Budget > 0 && SpawnQueue.Num() > 0)
 
 - **스트리밍 대상 연산** : 각 뷰어(플레이어 및 가상 뷰어) 주변 체비쇼프(Chebyshev) 반경을 중심으로 `ActiveRegionRadius`(기본 2 → 5×5)를 **4 Hz** 주기로 활성화 대상을 실시간으로 관리합니다.
 - **우선순위** : 새로 활성화할 region은 가장 가까운 뷰어 기준 오름차순으로 처리해 플레이어 주변부터 채웁니다.
-- **비활성화 유예 (Hysteresis 완충 처리)** : 더 이상 필요 없는 region은 `RegionDeactivateDelaySec`(10초) 동안 유지한 뒤 despawn 처리합니다. 이를 통해 영역 경계를 반복해서 오가는 플레이어로 인해 발생하는 불필요한 Spawn/Despawn 처리를 방지합니다.
-- **시간 예산 기반 타임슬라이싱 (Time-slicing)** : 개수가 아니라 **시간**으로 제한합니다. `StructuralBatchSize`(64)개씩 `BatchCreateEntities` / `BatchDestroyEntities`를 호출하고 매 batch 뒤에 시계를 확인해, `SpawnBudgetMs` / `DespawnBudgetMs`(각 1.0 ms)를 넘으면 다음 프레임으로 넘깁니다. 프레임당 최소 1 batch는 항상 진행하므로 대기열이 멈추지 않고, `MaxSpawnPerFrame`(500) / `MaxDespawnPerFrame`(1,000)은 하드 캡으로 남습니다.
-- **스트리밍 연동 예산** : `UMassBubbleStreamingMonitor`가 World Partition 셀의 로딩 / AddToWorld / RemoveFromWorld를 감지하는 동안(`IsBusy()`)에는 예산이 `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs`(각 0.25 ms)로 줄어듭니다. 엔진이 이미 프레임을 쓰는 구간에 NPC 구조 변경까지 얹지 않기 위해서입니다.
+- **사용자 수에 따른 규모** : 활성 region은 모든 뷰어 5×5 영역의 합집합이라(겹치는 region은 한 번만 계산) 사용자(뷰어)가 늘면 활성 region과 agent가 늘어납니다. Mass에서는 단일 Archetype 안의 Entity · Chunk 수가 늘고 Archetype은 1개로 유지됩니다. 뷰어 1명(25 region)에서 모든 region이 상한(`AgentsPerRegion` 400)까지 채워지면 10,000개입니다.
+- **비활성화 유예 (Hysteresis 완충 처리)** : 더 이상 필요 없는 region은 `RegionDeactivateDelaySec`(10초) 동안 유지한 뒤 despawn 처리합니다. 이를 통해 영역 경계를 반복해서 오가는 플레이어로 인해 발생하는 불필요한 Spawn/Despawn 처리를 방지합니다. 스폰 계획을 기다리는 `Planning` region도 같은 유예 뒤에 계획이 취소됩니다 ([PCG 스폰 계획](#3-pcg-스폰-계획)).
+- **시분할 기반 타임슬라이싱 (Time-slicing)** : 개수가 아니라 **시간**으로 제한합니다. `StructuralBatchSize`(64)개씩 `BatchCreateEntities` / `BatchDestroyEntities`를 호출하고 매 batch 뒤에 시계를 확인해, `SpawnBudgetMs` / `DespawnBudgetMs`(각 1.0 ms)를 넘으면 다음 프레임으로 넘깁니다. 프레임당 최소 1 batch는 항상 진행하므로 대기열이 멈추지 않고, `MaxSpawnPerFrame`(500) / `MaxDespawnPerFrame`(1,000)은 하드 캡으로 남습니다.
+- **스트리밍 연동 시분할 시간** : `UMassBubbleStreamingMonitor`가 World Partition 셀의 로딩 / AddToWorld / RemoveFromWorld를 감지하는 동안(`IsBusy()`)에는 시분할 시간이 `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs`(각 0.25 ms)로 줄어듭니다. 엔진이 이미 프레임을 쓰는 구간에 NPC 구조 변경까지 얹지 않기 위해서입니다.
 - **A/B** : `opt.crowd.BudgetedPump 0`이면 이전 방식(프레임당 고정 500 / 1,000개, 시계 확인 없음)으로 돌아가 스트리밍 Hitch를 재현할 수 있습니다.
-- **결정론적 복원** : despawn 시 `FCrowdSavedAgent`(NetId, 위치, 속도, retarget timer, RNG state)를 저장하고 재활성화 때 그대로 복원합니다. 최초 생성은 `Seed = Hash32(regionCoordHash ^ WorldSeed)`와 agent별 xorshift32로 재현 가능합니다.
+- **결정론적 복원** : despawn 시 `FCrowdSavedAgent`(NetId, 위치, 속도, retarget timer, RNG state, 진행 방향, 순항 속도)를 메모리에 보존하고 재활성화 때 그대로 복원합니다. PCG를 쓰지 않거나 그래프가 실패한 경우의 최초 생성은 `Seed = Hash32(regionCoordHash ^ WorldSeed)`와 agent별 xorshift32로 재현 가능하고, PCG를 쓰는 경우에는 그래프가 낸 점에서 결정론적으로 만들어져(같은 region · 같은 그래프 · 같은 월드 데이터 = 같은 점) 같은 보존 경로로 복원됩니다.
 
-### 3. 거리 기반 LOD와 Time-slicing
+### 3. PCG 스폰 계획
+
+새로운 리전(Region)이 활성화될 때 인구가 배치된 적이 없다면, 에이전트를 단순 균일 난수로 무작위 배치하는 대신 **PCG 그래프**에 이 리전의 에이전트가 어디서 시작하는지를 질의합니다. 이에 따라 디자이너가 그래프로 정의한 밀도와 분포가 서버 인구(Population)의 초기 상태가 됩니다.
+
+이 구조에서 **PCG는 순수한 데이터 생성기** 역할을 수행하며, region을 언제 채울지(뷰어 위치, 유예 시간, 시분할 처리, 영속성 등)에 대한 제어는 기존과 같이 UCrowdSubsystem이 담당합니다. PCG 그래프는 스포너 노드 없이 오직 포인트(Point) 데이터만 반환하며, 이 점들을 에이전트로 변환하는 규칙은 월드, UObject, PCG 등에 대한 의존성 없이 독립적으로 테스트할 수 있는 `CrowdPlan::BuildAgents` 함수에 구현되어 있습니다.
+
+```mermaid
+flowchart LR
+    EV["EvaluateRegions<br/>(4 Hz)"] -- "populate된 적 없는 region" --> PL["Planning 상태<br/>엔티티 없음"]
+    PL -- "Request" --> PLN["UCrowdPCGPlanner<br/>queue · 동시 실행 제한 · timeout"]
+    PLN -- "run당 1개 생성" --> HOST["ACrowdPCGHost<br/>UPCGComponent (GenerateLocal)"]
+    HOST -- "FCrowdPlanPoint[]" --> BUILD["CrowdPlan::BuildAgents<br/>필터 → 상한 thinning → agent"]
+    BUILD -- "Region.Saved + bPlanned" --> SPAWN["Spawning → Active<br/>복원 경로와 동일"]
+    HOST -. "실패 / timeout" .-> FALL["랜덤 배치 폴백<br/>(bPCGFallbackToRandom)"]
+    FALL --> SPAWN
+```
+
+```cpp
+// Crowd/CrowdSubsystem.cpp — BeginSpawn (요약)
+if (Region.bPlanned || Region.Saved.Num() > 0)
+{
+	StartSpawning(Region);   // 인구가 이미 정해진 region(영속 / 계획됨)은 그대로 복원
+	return;
+}
+if (CanPlanWithPCG())        // opt.crowd.PCG != 0 && planner 존재 && 그래프 로딩 중 / 준비됨
+{
+	BeginPlan(Region);       // State = Planning, UCrowdPCGPlanner::Request(coord, seed, cap)
+	return;
+}
+StartSpawning(Region);       // PCG 없음: region seed에서 결정론적으로 랜덤 생성
+```
+
+#### PCG 그래프 작성 규칙
+
+- 출력 데이터 및 좌표계
+  - 출력 노드의 포인트 데이터는 정확히 region 하나 분량이어야 합니다.
+  - 그래프는 리전 바운드를 기준으로 한 번만 실행되며, 출력되는 점은 월드 좌표계를 따릅니다. 에이전트는 AgentGroundZ 높이에서 이동하므로 X와 Y 좌표만 사용됩니다.
+- 그리드 좌표 공간 (Coordinate Space) 설정
+  - **`Create Points Grid`** 노드의 좌표 공간은 Origin Component로 설정해야 합니다.
+  - 매 실행마다 리전 중심에 생성되는 호스트 액터를 기준으로 그리드가 만들어지므로, 모든 리전이 일관된 규칙으로 포인트를 수신할 수 있습니다.
+- 밀도(Density) 및 에이전트 수 산정
+  - 밀도가 0 이하인 포인트는 유효하지 않은 점으로 간주합니다.
+  - 유효 포인트의 개수가 곧 해당 리전의 에이전트 수가 되며, 설정된 `AgentsPerRegion` 값을 초과할 경우 균일하게 축소합니다.
+- 높이 바운드 설정
+  - 높이 방향 바운드는 AgentGroundZ를 기준으로 위아래 1PCGBoundsHalfHeightCm1(기본값 100m) 범위로 설정됩니다.
+  - 랜드스케이프나 메시를 샘플링하는 그래프는 이 값을 실제 지형 높이에 알맞게 맞추어야 합니다.
+- 스포너 노드 배제
+  - PCG 그래프 내부에서 액터나 엔티티를 직접 생성하는 스포너 노드는 사용하지 않습니다.
+  - Mass Entity 생성 및 관리는 전적으로 `UCrowdSubsystem`이 담당합니다.
+- 에셋 패키징 및 폴백(Fallback) 처리
+  - 데디케이티드 서버를 포함한 쿠킹된 빌드에는 반드시 해당 PCG 그래프 에셋이 포함되어야 합니다.
+  - 에셋 로드에 실패할 경우 `[CrowdPCG]` 에러 로그를 기록하고 기존의 랜덤 배치 방식으로 안전하게 폴백합니다.
+<p align="center">
+  <img src="Image/MassBubble_PCG_Graph.PNG" alt="PCG_MassAgentSpawner 그래프" width="963"><br>
+  <sub>Spawn Graph <code>PCG_MassAgentSpawner</code> — Create Points Grid → Attribute Noise → Density Filter → Transform Points → Output</sub>
+</p>
+
+#### 진단과 A/B
+
+| 도구 | 용도 |
+|---|---|
+| `opt.crowd.PCG` (0 / 1) | 아직 populate되지 않은 region을 PCG 없이 랜덤 배치 (A/B). 이미 populate된 region은 그대로 유지됩니다 |
+| `opt.crowd.PCG.Stats` | planner 상태(그래프 로딩 / ready / FAILED), 큐 · 실행 중 수, 요청 · 성공 · 실패 · timeout · 취소 수, 평균 / 최대 지연 시간 |
+| `opt.crowd.PCG.Replan` | 비활성 region의 계획 · 영속 상태를 지워, 다음에 필요해질 때 현재 그래프 · 설정으로 다시 생성 (그래프를 고친 뒤). Active region은 agent를 유지합니다 |
+| `stat OptCrowd` · CSV | `PCG Plan Pump` 사이클 · `Plan` 타이밍 · `PlansPending` |
+| `opt.crowd.Stats` · `[Hitch]` 로그 | `planning` region 수, `pcg plans pending` |
+| Verbose 로그 | `[Crowd] region (x,y) planned: 점 → agent` (거부 · 솎음 내역과 지연 시간 포함). 첫 계획이 도착하면 `[CrowdPCG] first plan arrived`가 한 번 남습니다 |
+
+### 4. 거리 기반 LOD와 Time-slicing
 
 | Tier | 거리 (가장 가까운 뷰어 기준) | 시뮬레이션 주기 |
 |---|---|---|
@@ -349,7 +426,7 @@ LOD.PendingDelta = 0.f;
 const FVector2f Velocity = (LODs[i].Tier == ECrowdLOD::Off) ? FVector2f::ZeroVector : Motions[i].Velocity;
 ```
 
-### 4. 병렬 이동 처리
+### 5. 병렬 이동 처리
 
 Movement Processor는 `bRequiresGameThreadExecution = false`이며 `ParallelForEachEntityChunk`로 chunk를 worker thread에 분산합니다.
 
@@ -361,8 +438,8 @@ std::atomic<int32> Simulated{ 0 };
 auto ProcessChunk = [&](FMassExecutionContext& ChunkContext)
 {
 	int32 LocalSimulated = 0;
-	// ... agent 루프: time-slicing(시간 분할) → 배회 → 물리 상태 반영 → 홈 구역 경계에서 반영
-	Simulated.fetch_add(LocalSimulated, std::memory_order_relaxed);   // chunk당 atomic 1회
+	// ... agent 루프: time-slicing(시간 분할) → CrowdWander::Advance (배회 구간 · region 경계 band · 안전 clamp)
+	Simulated.fetch_add(LocalSimulated, std::memory_order_relaxed);   // chunk당 atomic 1회 (Clamped 카운터도 동일)
 };
 
 if (CrowdCVars::ParallelMove != 0)
@@ -375,7 +452,8 @@ else
 }
 ```
 
-- **Thread-safety 근거** — (1) chunk-local write만 수행, (2) 설정은 UObject가 아니라 불변 POD 스냅샷 `FCrowdTuning`에서 읽음, (3) RNG state가 agent별 fragment 안에 있어 공유 난수 생성기가 없음, (4) 통계 카운터는 chunk 단위로 모아 atomic 1회.
+- **Thread-safety 근거** — (1) chunk-local write만 수행, (2) 설정은 UObject가 아니라 불변 POD 스냅샷 `FCrowdTuning`에서 읽음, (3) RNG state가 agent별 fragment 안에 있어 공유 난수 생성기가 없음, (4) 통계 카운터(`Simulated`, `Clamped`)는 chunk 단위로 모아 각각 atomic 1회.
+- **배회 모델 (`CrowdWander.h`)** : agent는 직선 **구간**(`MinRetargetSec`–`MaxRetargetSec`)을 등속으로 걷고, 다음 구간의 방향은 이전 방향에 작은 회전(≤ `MaxTurnDeg`)을 더한 값입니다. 구간 하나가 곧 dead reckoning이 보낼 (위치, 속도) 한 쌍이라 부드러운 움직임이 대역폭을 더 쓰지 않습니다. region 경계에서는 반사하지 않고, 경계 안쪽 **band**에서 모든 agent가 같은 회전율(`WallTurnRateDeg`)로 휘어 빠져나오게 해 열린 땅의 밀도를 균일하게 유지합니다. 스텝은 구간 경계에서 쪼개지므로 time-slicing으로 건너뛰며 걸어도 같은 경로를 걷습니다. 모델 전체가 순수 함수이고 `Crowd.Wander.*` 테스트가 검증합니다.
 - `UCrowdSubsystem`은 `TMassExternalSubsystemTraits`에서 `GameThreadOnly = true`로 선언해, 이 서브시스템을 요구하는 프로세서(LOD, Snapshot)가 game thread에서만 접근하도록 명시합니다.
 
 #### 에디터 검증 — Unreal Insights
@@ -389,7 +467,7 @@ else
 - **`OPT_SCOPE` 이벤트** : 프로세서 스코프 안에 `Opt.Crowd.LOD` / `Opt.Crowd.Move` / `Opt.Crowd.Snapshot`이 중첩되어 보이고, 타이머 패널에는 `Opt.Crowd.Director`, `Opt.Crowd.Bubble`, `Opt.Crowd.SpawnSlice` / `DespawnSlice`가 같은 이름 체계로 나열됩니다 ([계측과 실험 설계](#계측과-실험-설계)).
 - **프레임 비중** : 이 프레임에서 Mass `PrePhysics` phase 전체는 ≈ 0.79 ms, 프레임은 14.03 ms입니다. 단일 프레임 샘플이므로 벤치마크가 아니며, 비교 측정은 A/B 스위치로 합니다.
 
-### 5. Snapshot과 공간 격자
+### 6. Snapshot과 공간 격자
 
 복제 계층이 Mass `EntityManager`를 직접 순회하지 않도록, Snapshot Processor가 `ReplicationHz`(기본 10 Hz)마다 위치 · 속도 · ID를 region별 평탄(flat) 배열로 복사합니다. 스냅샷이 필요 없는 프레임은 쿼리를 아예 실행하지 않고 반환합니다.
 
@@ -443,7 +521,7 @@ for (const FCrowdViewer& Viewer : Viewers)
 // ForEachAgentInCircle은 mask 밖 region(= 오래된 grid)을 건너뜁니다.
 ```
 
-### 6. 플레이어별 AOI 복제 — `ACrowdBubble`
+### 7. 플레이어별 AOI 복제 — `ACrowdBubble`
 
 400명짜리 이웃을 400개의 replicated Actor로 만들지 않고, **플레이어당 Actor 1개**가 AOI 전체를 FastArray로 복제합니다 (Epic의 MassReplication 플러그인이 쓰는 Client Bubble 계열의 접근과 같은 아이디어를 최소 구현으로 작성했습니다).
 
@@ -475,7 +553,7 @@ void ACrowdBubble::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 `ServerRebuild()`는 `SnapshotSerial`이 바뀐 프레임(≈ `ReplicationHz`)에만 실행되며 네 단계로 구성됩니다.
 
 1. **기준점 이동** : 뷰어가 origin에서 110 m를 넘어 벗어났을 때만 갱신합니다.
-2. **관심구역 필터링** : `ForEachAgentInCircle`로 반경 내 후보를 모으고, `MaxAgentsPerBubble`(400)을 넘으면 거리순 상위 N개만 남깁니다.
+2. **관심구역 필터링** : `ForEachAgentInCircle`로 반경 내 후보를 모으고, `MaxAgentsPerBubble`(400)을 넘으면 순위(`CrowdNet::InterestRank`)가 높은 상위 N개만 남깁니다. 이미 복제 중인 agent는 10 % 더 가까운 것으로 치고 반경의 110 %까지 머무를 수 있어(`InterestCandidate`), 관심구역 경계에서 agent가 들락날락하며 전체 레코드를 다시 보내는 일이 줄어듭니다 (테스트 `Crowd.Interest`).
 3. **진입/유지/이탈 판정** : `NetId → index` 맵과 epoch mark-and-sweep으로 진입 / 유지 / 이탈을 판정합니다.
 4. **Dirty 마킹** : 바뀐 item만 `MarkItemDirty`, 구조가 바뀌면 `MarkArrayDirty`, 마지막에 Push Model dirty.
 
@@ -593,7 +671,7 @@ Iris와 Legacy FastArray 모두에서 `ACrowdBubble`의 `AgentArray`가 클라�
   - **식별자 체계 격리**: 시각화 툴에 표기된 상위 `NetId`(20 및 16)는 복제용 네트워크 액터 컨테이너 자체가 부여받은 내부 핸들이며, 구조체 배열 내부에서 각 NPC 에이전트를 추적하는 도메인 데이터인 `FCrowdAgentItem::NetId` 값과는 완전히 독립된 별개의 관리 코드입니다.
   - **대역폭 수치 직접 비교 불가**: 두 트레이스는 패킷의 전송 아키텍처 성격 자체가 완전히 다릅니다. Iris 트레이스는 대형 구조체의 전체 상태를 분할 전송하는 과정 중 포착된 시점이며, Legacy 트레이스는 순수 가변 델타 압축 패킷입니다. 따라서 단순히 표기된 개별 패킷 비트 수만으로 시스템 전체의 우위를 단정할 수 없으며, 고정 통제 조건에서의 장기 평균 송신량(KB/s) 데이터는 추가 실측 실험 섹션을 통해 정량적 지표로 업데이트될 예정입니다.
 
-### 7. 와이어 포맷 (Wire Format) — 데이터 양자화 및 격자 원점 설정
+### 8. 와이어 포맷 (Wire Format) — 데이터 양자화 및 격자 원점 설정
 
 | 필드 | 타입 | 크기 | 단위 / 범위 |
 |---|---|---|---|
@@ -660,10 +738,10 @@ Out.BubbleRadiusCm = FMath::Clamp(S.BubbleRadiusCm, 1000.f, CrowdNet::MaxBubbleR
 	- Z: 평면 월드 기반의 클라이언트 설정값 적용.
 	- Sent* / SeenEpoch: 서버 내부 로직용(Server-Only) 변수로 패킷 전송 제외.
 
-### 8. 데드 레코닝 (Dead Reckoning)
+### 9. 데드 레코닝 (Dead Reckoning)
 
-- **클라이언트**: 최신 수신 데이터를 바탕으로 SentPos + SentVel × Δt 연산을 수행해 실시간 위치를 외삽(Extrapolation)합니다.
-- **서버**: 서버가 시뮬레이션하는 클라이언트의 예측값이 실제 위치(True Position) 기준 허용 오차를 벗어나거나, 에이전트의 속도가 크게 변한 경우에만 데이터를 재전송(네트워크 갱신)합니다.
+- **클라이언트**: 최신 수신 데이터를 바탕으로 SentPos + SentVel × min(Δt, `MaxExtrapolationSec`) 연산을 수행해 실시간 위치를 외삽(Extrapolation)합니다.
+- **서버**: 서버가 시뮬레이션하는 클라이언트의 예측값이 실제 위치(True Position) 기준 허용 오차를 벗어나거나, 에이전트의 속도가 크게 변한 경우, 또는 걷는 에이전트가 `HeartbeatSec` 동안 조용했던 경우에만 데이터를 재전송(네트워크 갱신)합니다.
 
 ```cpp
 // Net/CrowdNetMath.h
@@ -672,14 +750,21 @@ inline bool ShouldResend(
 	const FVector2D& SentPos, const FVector2f& SentVel,
 	double SecondsSinceSent, float ToleranceCm, float VelocityEpsCmPerSec)
 {
-	const FVector2D Predicted = SentPos + FVector2D(SentVel.X, SentVel.Y) * SecondsSinceSent;
+	// 클라이언트가 지금 그리는 위치와 같은 함수로 예측 (외삽 상한 포함)
+	const FVector2D Predicted = Extrapolate(SentPos, SentVel, SecondsSinceSent);
 	if (FVector2D::DistSquared(TruePos, Predicted) > static_cast<double>(ToleranceCm) * ToleranceCm)
 	{
 		return true;
 	}
 
 	const FVector2f DeltaV = TrueVel - SentVel;
-	return DeltaV.SizeSquared() > VelocityEpsCmPerSec * VelocityEpsCmPerSec;
+	if (DeltaV.SizeSquared() > VelocityEpsCmPerSec * VelocityEpsCmPerSec)
+	{
+		return true;
+	}
+
+	// 걷는 agent가 HeartbeatSec 동안 조용했다면, 클라이언트의 외삽이 바닥나기 전에 다시 보냄
+	return SecondsSinceSent >= HeartbeatSec && !SentVel.IsNearlyZero();
 }
 ```
 
@@ -691,13 +776,21 @@ Item.SentVel = FVector2f(CrowdNet::DequantizeVelocity(Item.VX), CrowdNet::Dequan
 ```
 
 ```cpp
-// Net/CrowdBubble.cpp — 클라이언트 절반: 수신 상태 + 속도 × 경과 시간 
-FVector2D FCrowdAgentItem::GetExtrapolatedPosition(const FVector2D& OriginWorld, double Now, double MaxExtrapolationSec) const
+// Net/CrowdNetMath.h — 서버와 클라이언트가 같은 함수 · 같은 상수를 씁니다
+constexpr double MaxExtrapolationSec = 3.0;   // 마지막 갱신 이후 클라이언트가 외삽하는 최대 시간 (서버도 이 값을 전제로 판단)
+constexpr double HeartbeatSec        = 2.0;   // 걷는 agent가 이만큼 조용하면 다시 보냄
+
+FORCEINLINE FVector2D Extrapolate(const FVector2D& SentPos, const FVector2f& SentVel, double SecondsSinceSent)
 {
-	const double Elapsed = FMath::Clamp(Now - RecvTime, 0.0, MaxExtrapolationSec);
+	const double Elapsed = FMath::Clamp(SecondsSinceSent, 0.0, MaxExtrapolationSec);
+	return SentPos + FVector2D(SentVel.X, SentVel.Y) * Elapsed;
+}
+
+// Net/CrowdBubble.cpp — 클라이언트 절반: 수신 상태 + 속도 × 경과 시간 (위 함수를 그대로 호출)
+FVector2D FCrowdAgentItem::GetExtrapolatedPosition(const FVector2D& OriginWorld, double Now) const
+{
 	const FVector2D Base = OriginWorld + FVector2D(CrowdNet::DequantizeOffset(X), CrowdNet::DequantizeOffset(Y));
-	const FVector2f Vel = GetVelocity();
-	return Base + FVector2D(Vel.X, Vel.Y) * Elapsed;
+	return CrowdNet::Extrapolate(Base, GetVelocity(), Now - RecvTime);
 }
 ```
 
@@ -705,23 +798,22 @@ FVector2D FCrowdAgentItem::GetExtrapolatedPosition(const FVector2D& OriginWorld,
 - **양자화 round-trip** : 양자화 오차까지 포함해, 클라이언트가 보는 값과 같은 기준으로 비교합니다.
 - **거리별 허용 오차** : 30 m 이내 `NearErrorCm`(30 cm), 그 밖 `FarErrorCm`(150 cm). 가까운 agent는 부드러움, 먼 agent는 대역폭을 우선합니다.
 - **속도 임계(25 cm/s)** : 방향 전환이 위치 오차로 드러나기 전에 선제적으로 재전송합니다.
-- **외삽 상한** : `MaxExtrapolationSec`(1.5초). 연결이 멈춰도 agent가 멀리 움직이지 않습니다.
+- **외삽 상한 · heartbeat** : `MaxExtrapolationSec`(3.0초)은 `CrowdNet`에 있는 **공유 상수 하나**이고, 서버가 모르는 클라이언트 전용 상한은 없습니다. 서버는 같은 `Extrapolate()`로 클라이언트가 그리는 위치를 예측하고, 걷는 agent가 `HeartbeatSec`(2.0초) 동안 조용하면 상한이 바닥나기 전에 다시 보냅니다 (멈춰 있는 agent는 외삽하지 않으므로 heartbeat도 없습니다). 연결이 멈추면 agent는 상한 위치에서 멈추고(`DrivingVelocity`가 상한 이후 0) 멀리 날아가지 않습니다. 초기 버전은 서버(무한 외삽 가정)와 클라이언트(1.5초 후 중단)의 상한이 달라, 걷다가 멈춘 뒤 다음 갱신에서 제자리로 튀었습니다 (테스트 `Crowd.DeadReckoning` · `Crowd.Presentation`).
 
-### 9. 클라이언트 렌더링
+### 10. 클라이언트 렌더링
 
-`UCrowdRenderSubsystem`이 매 프레임 (1) 외삽, (2) 보간, (3) 단일 ISM에 batch write를 수행합니다.
+`UCrowdRenderSubsystem`이 매 프레임 (1) 외삽, (2) smoothing, (3) 단일 ISM에 batch write를 수행합니다.
 
 ```cpp
-// MassBubbleRender/CrowdRenderSubsystem.cpp — Tick
-const double Alpha = (Settings->SmoothingRate > 0.f)
-	? 1.0 - FMath::Exp(-static_cast<double>(Settings->SmoothingRate) * static_cast<double>(DeltaTime))
-	: 1.0;                                            // 프레임 레이트에 독립적인 지수 보간
+// MassBubbleRender/CrowdRenderSubsystem.cpp — Tick (요약)
+const CrowdSmoothing::FFrame Frame = CrowdSmoothing::MakeFrame(Params, DeltaTime);   // 프레임당 1회: 1 − e^(−rate·Δt), 프레임 레이트에 독립
 
 for (int32 Index = 0; Index < Count; ++Index)
 {
 	const FCrowdAgentItem& Item = Items[Index];
-	const FVector2D Target = Item.GetExtrapolatedPosition(Origin, Now, MaxExtrapolation);   // dead reckoning, client half
-	// ... Visuals(NetId)로 Target을 향해 glide. 첫 등장 / 재진입은 snap
+	const FVector2D Target = Item.GetExtrapolatedPosition(Origin, Now);   // dead reckoning, client half
+	const FVector2f TargetVelocity = Item.GetDrivingVelocity(Now);        // 외삽 상한 이후에는 0
+	// ... Visuals(NetId): 첫 등장 / 재진입은 Begin()으로 서버 위치에서 바로 시작, 그 외에는 CrowdSmoothing::Step()
 	Transforms.Emplace(FRotator(0.0, Yaw, 0.0), FVector(Shown.X, Shown.Y, Z), Scale);
 }
 
@@ -730,14 +822,14 @@ Instances->BatchUpdateInstancesTransforms(0, Transforms, /*bWorldSpace=*/false, 
 ```
 
 - **`ACrowdRenderHost`** : Transient, 비복제, Tick 없음, 충돌 없음. 단일 `UInstancedStaticMeshComponent`만 보유합니다.
-- **보간 처리** : `α = 1 − e^(−k·Δt)` (k = `SmoothingRate`, 기본 15/s). 프레임레이트와 무관한 지수 보간식입니다. 데드 레코닝 위치 보정 시 캐릭터가 순간 이동하듯 튀는 현상을 방지합니다.
-- **재진입 처리** : `Epoch`를 통해 직전 프레임의 렌더링 여부를 판단합니다. 이를 통해 버블(Bubble) 범위에 다시 들어온 에이전트가 이전 위치에서부터 미끄러지듯 날아오는 오작동을 방지하고, 현재 위치로 즉시 이동시킵니다.
-- **버퍼 재사용** : `Transforms` 배열은 warm-up 이후 할당이 없고, 인스턴스 수가 변하더라도 뒤에서부터 add/remove 하므로 생존 인스턴스의 인덱스가 바뀌지 않습니다.
-- **단일 코드 경로** : standalone / listen host에서도 동일하게 동작합니다. Authoritive 측은 `FCrowdAgentItem::PostReplicatedAdd*` 콜백을 받지 않으므로 `FillItem` 단계에서 `RecvTime`을 직접 기록하도록 처리했습니다.
+- **Smoothing (`CrowdSmoothing.h`)** : 복제 상태는 "위치 + 구간별 등속"이라 그대로 그리면 구간마다 모서리가 생기고, 정지는 급정거, dead reckoning 보정은 점프로 보입니다. (1) 그리는 속도가 복제된 속도로 지수 수렴해(`VelocityEasingRate` 7/s) 회전은 짧은 곡선, 정지는 짧은 미끄러짐이 됩니다. (2) 위치는 그 속도로 dead reckoning(velocity feed-forward)한 뒤, (3) 서버가 예측하는 위치로 끌어당겨(`CorrectionRate` 4/s) 오차가 쌓이지 않게 하고, (4) yaw는 그리는 속도를 따라가며(`YawRate` 10/s) 서 있으면 마지막 방향을 유지합니다. 목표에서 `SnapDistanceCm`(500 cm) 넘게 벗어나면 미끄러지지 않고 바로 이동합니다. 모든 계수는 `α = 1 − e^(−rate·Δt)` 형태라 프레임 레이트와 무관합니다 (테스트: 걷는 agent는 예측 위치에서 0.5 cm 이내, 60 fps는 144 fps와 2 cm 이내, 30 fps는 6 cm 이내의 같은 곡선). 위치만 저역통과하던 초기 버전은 걷는 agent를 수 cm 뒤따랐습니다. `opt.crowd.RenderSmoothing 0`이면 smoothing 없이 외삽 위치를 그대로 그립니다 (A/B).
+- **재진입 처리** : `Epoch`를 통해 직전 프레임의 렌더링 여부를 판단합니다. 이를 통해 버블(Bubble) 범위에 다시 들어온 에이전트가 이전 위치에서부터 미끄러지듯 날아오는 오작동을 방지하고, 현재 위치에서 다시 시작합니다 (바라보던 방향은 유지).
+- **버퍼 재사용** : `Transforms` 배열은 warm-up 이후 할당이 없고, 인스턴스 수가 변하더라도 뒤에서부터 add/remove 하므로 생존 인스턴스의 인덱스가 바뀌지 않습니다. NetId별로 그리는 상태를 담는 `Visuals` 맵은 bubble을 떠난 agent가 쌓여 인스턴스 수의 2배 + 64를 넘을 때만 한꺼번에 정리합니다.
+- **단일 코드 경로** : standalone / listen host에서도 동일하게 동작합니다. Authoritative 측은 `FCrowdAgentItem::PostReplicatedAdd*` 콜백을 받지 않으므로 `FillItem` 단계에서 `RecvTime`을 직접 기록하도록 처리했습니다.
 - **Nanite 미사용** : 단순한 저폴리곤 실린더 메시를 사용하므로 Nanite가 고폴리곤 지오메트리를 처리할 때 발생하는 최적화 오버헤드가 필요하지 않습니다.
 - **에셋 비동기 로드** : Agent 메시 / 머티리얼은 bubble이 처음 도착할 때 `FStreamableManager`로 비동기 요청합니다. 동기 로드로 game thread가 멈추는 것을 피하며, 로드가 끝나면 다음 프레임부터 군중이 그려집니다. 로드에 실패하면 에러 로그를 한 번 남기고 재시도를 멈춥니다(`bHostFailed`).
 
-### 10. 모듈 분리 — `ClientOnly`
+### 11. 모듈 분리 — `ClientOnly`
 
 렌더링 코드는 `MassBubbleRender`(ClientOnly) 모듈에 두고, 서버 타깃에는 포함하지 않습니다.
 
@@ -780,9 +872,9 @@ bool UCrowdRenderSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 
 참고: 렌더 모듈은 자체 stat group(`STATGROUP_OptRender`)과 CSV category(`OptRender`)를 정의합니다. `MassBubble` 모듈의 CSV category 심볼을 모듈 경계 너머로 `dllimport` 하는 비용을 피하기 위해서입니다.
 
-### 11. World Partition Streaming Anchor
+### 12. World Partition Streaming Anchor
 
-서버 스트리밍(`wp.Runtime.EnableServerStreaming=1`)에서는 기본적으로 PlayerController만 streaming source이므로, 아무도 보고 있지 않은 AI 전용 구역은 unload 됩니다. `AMassBubbleStreamingAnchor`는 **한 위치에 (1) WP streaming source와 (2) crowd viewer 등록**을 함께 걸어, 셀 스트리밍과 NPC population이 같은 기준으로 움직이게 합니다.
+서버 스트리밍(`wp.Runtime.EnableServerStreaming=1`)에서는 기본적으로 PlayerController만 streaming source이므로, 아무도 보고 있지 않은 AI 전용 구역은 unload 됩니다. `AMassBubbleStreamingAnchor`는 **한 위치에 (1) WP streaming source와 (2) crowd viewer 등록**을 함께 연동하여, 셀 스트리밍과 NPC population이 같은 기준으로 움직이게 합니다.
 
 ```cpp
 // World/MassBubbleStreamingAnchor.cpp — BeginPlay 
@@ -806,13 +898,13 @@ if (bRegisterAsCrowdViewer)
 
 - **서버 전용 virtual viewer**라서 `ACrowdBubble`을 갖지 않습니다. 복제 비용 없이 *시뮬레이션 · region 스트리밍 · WP 스트리밍* 부하만 재현하는 **부하 테스트 봇**으로 쓸 수 있습니다 (`opt.crowd.SpawnBots N` 또는 `-OptBots=N`). 복제 비용은 실제 클라이언트로 측정해야 합니다.
 - 레벨에 직접 배치하는 anchor는 World Partition 디테일에서 **"Is Spatially Loaded"를 비활성화**해야 합니다. 그렇지 않으면 anchor가 자신이 유지해야 할 바로 그 셀 안에 존재하게 됩니다.
-- **Ramp 생성 / 제거** : 봇은 한 번에 만들지 않습니다. `opt.crowd.SpawnBots N` / `-OptBots=N`은 `UCrowdSubsystem`에 작업을 맡기고, `TickBotRamp`가 `BotRampIntervalSec`(기본 1초)마다 1개씩 생성합니다 (`ClearBots`도 1개씩 제거하며, 아직 생성 전인 봇은 취소). 수십 개 셀이 한 프레임에 로드 / 언로드되고 GC가 뒤따르는 burst를 피하기 위해서이며, `opt.crowd.BotRampSec 0`이 그 burst를 재현합니다.
+- **점진적 생성 / 제거** : 봇은 한 번에 만들지 않습니다. `opt.crowd.SpawnBots N` / `-OptBots=N`은 `UCrowdSubsystem`에 작업을 맡기고, `TickBotRamp`가 `BotRampIntervalSec`(기본 1초)마다 1개씩 생성합니다 (`ClearBots`도 1개씩 제거하며, 아직 생성 전인 봇은 취소). 수십 개 셀이 한 프레임에 로드 / 언로드되고 GC가 뒤따르는 burst를 피하기 위해서이며, `opt.crowd.BotRampSec 0`이 그 burst를 재현합니다.
 - **Low priority streaming source** : 봇의 source는 `EStreamingSourcePriority::Low`라서 실제 플레이어가 기다리는 셀이 먼저 로드됩니다. 서버가 느린 로딩을 기다리지도 않습니다 (`wp.Runtime.BlockOnSlowStreaming=0`).
-- **셀을 Load만 / Activate까지** : `opt.crowd.BotActivateCells`가 `1`(기본)이면 봇이 플레이어처럼 셀을 Activated(컴포넌트 등록 · BeginPlay · tick)까지 올려 가장 무거운 부하를 재현하고, `0`이면 Loaded까지만 올립니다. Mass crowd에는 Actor가 필요 없으므로 population만 유지하려면 `0`으로 충분합니다.
-- **Deferred spawn** : `SpawnActorDeferred` → `ConfigureAsRuntimeBot()` → `FinishSpawning` 순서입니다. streaming source를 켜는 시점이 `BeginPlay`이므로, 우선순위 · 목표 상태는 그보다 먼저 설정해야 합니다.
+- **셀 활성화 수준 설정 (Load Only / Full Activate)** : `opt.crowd.BotActivateCells`가 `1`(기본)이면 봇이 플레이어처럼 셀을 Activated(컴포넌트 등록 · BeginPlay · tick)까지 올려 가장 무거운 부하를 재현하고, `0`이면 Loaded까지만 올립니다. Mass crowd에는 Actor가 필요 없으므로 population만 유지하려면 `0`으로 충분합니다.
+- **Streaming Source 활성화 이전 필수 설정 및 호출 시퀀스** : `SpawnActorDeferred` → `ConfigureAsRuntimeBot()` → `FinishSpawning` 순서입니다. streaming source를 켜는 시점이 `BeginPlay`이므로, 우선순위 · 목표 상태는 그보다 먼저 설정해야 합니다.
 - **동심원 배치** : 봇은 원점 중심의 3개 궤도(반경 × 1.0 / 0.75 / 0.5)에 나뉘어 일정 속도로 순회하므로 active 영역이 덜 겹칩니다. `RF_Transient`라 저장되지 않습니다.
 
-### 12. World Partition 로딩 / 언로딩 최적화
+### 13. World Partition 로딩 / 언로딩 최적화
 
 #### 문제 상황
 * World Partition 셀 로드/언로드 시 컴포넌트 등록·해제 및 엔진 강제 GC 발생하게 됩니다.
@@ -820,8 +912,8 @@ if (bRegisterAsCrowdViewer)
 * 이 타이밍에 대규모 NPC Spawn / Despawn이 겹칠 경우 극심한 프레임 드랍(Hitch) 유발하게 됩니다.
 
 #### 최적화 내역
-* **엔진 작업 분산:** 단일 프레임에 집중되던 엔진 부하 작업을 여러 프레임으로 분산 처리합니다.
-* **고부하 작업 이연:** **고부하 작업(GC 및 구조 변경)**을 스트리밍 유휴(Idle) 시점으로 스케줄링 이연합니다.
+* **엔진 작업 분산:** 단일 프레임에 집중되던 엔진 부하 작업(셀 등록 · 해제, GC)을 여러 프레임으로 분산 처리합니다.
+* **고부하 작업 이연:** 고부하 작업(GC 및 구조 변경)을 스트리밍 유휴(Idle) 시점으로 스케줄링 이연합니다.
 * **원인 식별 정교화:** 잔여 성능 저하(Hitch) 발생 시, **로그 분류**를 통해 병목 원인을 명확히 추적 및 식별할 수 있도록 합니다.
 
 
@@ -829,36 +921,39 @@ if (bRegisterAsCrowdViewer)
 flowchart LR
     WP["World Partition<br/>셀 상태 변화<br/>Loading / MakingVisible / MakingInvisible / Unloaded"]
     MON["UMassBubbleStreamingMonitor<br/>고부하 셀 집합 · GC 정보"]
-    CROWD["UCrowdSubsystem::PumpRegionJobs<br/>NPC spawn / despawn 예산"]
+    CROWD["UCrowdSubsystem::PumpRegionJobs<br/>NPC spawn / despawn 시분할 처리시간"]
     GC["Quiet GC<br/>ForceGarbageCollection(false)"]
+    IGC["Incremental GC<br/>도달성 분석 · 수집 · BeginDestroy를 프레임에 분산"]
     LOG["[Hitch] 로그<br/>GC · WP · crowd 상태"]
 
     WP -- "OnLevelStreamingStateChanged" --> MON
     MON -- "스트리밍 과부하 발생시 시간 제한 축소 1.0 → 0.25 ms" --> CROWD
     MON -- "레벨 언로드 후 0.75초 동안 부하가 없으면<br/>(또는 20초 경과)" --> GC
+    GC -- "GC 실행" --> IGC
     MON -- "opt.hitch.LogMs 초과 프레임" --> LOG
 ```
 
 | 단계 | 구성 요소 | 역할 |
 |---|---|---|
 | ① 분산 | 엔진 streaming CVar 프로파일 | AddToWorld / RemoveFromWorld의 프레임당 시간 제한을 낮추고, 동시에 로딩하는 셀 수를 제한 |
-| ② 감지 · 양보 | `UMassBubbleStreamingMonitor` → `UCrowdSubsystem` | 셀이 로딩 / 추가 / 제거 중인 동안 NPC spawn / despawn 예산을 1.0 → 0.25 ms로 축소 |
+| ② 감지 · 양보 | `UMassBubbleStreamingMonitor` → `UCrowdSubsystem` | 셀이 로딩 / 추가 / 제거 중인 동안 NPC spawn / despawn 시분할 처리시간을 1.0 → 0.25 ms로 축소 |
 | ③ 지연 | Quiet GC | 셀 언로드 직후 GC를 막고, World Partition 부하가 없을 때 실행 |
-| ④ 귀속 | Hitch 로그 | 긴 프레임마다 GC · WP · crowd 상태를 함께 기록해 원인을 구분 |
-| ⑤ 부하 재현 · 격리 | 봇 Ramp, Snapshot Scope  | 스트리밍 부하를 한 번에 몰지 않고 재현하고, 복제되지 않는 region의 비용을 제거 |
+| ④ 분할 | Incremental GC | GC 자체(도달성 분석 · 수집 · BeginDestroy)를 여러 프레임 · 프레임당 시간 제한으로 나눠 실행 |
+| ⑤ 귀속 | Hitch 로그 | 긴 프레임마다 GC · WP · crowd 상태를 함께 기록해 원인을 구분 |
+| ⑥ 부하 재현 · 격리 | 점진적 봇 생성 삭제, Snapshot Scope  | 스트리밍 부하를 한 번에 처리하지 않고, 복제되지 않는 region의 비용을 제거 |
 
 #### ① 엔진 streaming CVar 프로파일
 
-엔진의 레벨 스트리밍 시, 단일 셀의 로드/언로드 연산을 <b>프레임별 예산 제한(Time-Slicing)</b>에 맞추어 분산 처리합니다. 이 제한과 동시 로딩 수를 서버 용도에 맞게 조정한 프로파일을 `Core/MassBubbleRuntimeConfig.cpp`에 두고, 첫 월드가 시작될 때 한 번 적용합니다.
+엔진의 레벨 스트리밍 시, 단일 셀의 로드/언로드 연산을 <b>프레임별 시분할 시간 제한(Time-Slicing)</b>에 맞추어 분산 처리합니다. 이 제한과 동시 로딩 수를 서버 용도에 맞게 조정한 프로파일을 `Core/MassBubbleRuntimeConfig.cpp`에 두고, 첫 월드가 시작될 때 한 번 적용합니다.
 
 | CVar | 값 | 적용 대상 | 목적 |
 |---|---|---|---|
 | `s.ForceGCAfterLevelStreamedOut` | 0 | 공통 | 셀 언로드 직후 엔진이 강제하는 GC를 끄고, 대신 ③ Quiet GC가 실행 |
 | `s.LevelStreamingActorsUpdateTimeLimit` | 3.0 | 공통 | 프레임당 AddToWorld(셀의 액터를 월드에 추가) 시간 제한 (ms) |
 | `s.PriorityLevelStreamingActorsUpdateExtraTime` | 2.0 | 공통 | 우선순위 셀에 주는 추가 시간 (ms) |
-| `s.LevelStreamingComponentsRegistrationGranularity` | 4 | 공통 | 시계 확인 사이에 등록하는 컴포넌트 수. 작을수록 시간 제한을 덜 넘김 |
+| `s.LevelStreamingComponentsRegistrationGranularity` | 4 | 공통 | 프레임 시간 체크 주기당 컴포넌트 등록 개수. 값을 낮출수록 타임 아웃(Time Budget 초과) 및 프레임 드랍 현상을 방지. |
 | `s.UnregisterComponentsTimeLimit` | 1.0 | 공통 | 프레임당 RemoveFromWorld(셀의 컴포넌트 해제) 시간 제한 (ms) |
-| `s.LevelStreamingComponentsUnregistrationGranularity` | 2 | 공통 | 시계 확인 사이에 해제하는 컴포넌트 수 |
+| `s.LevelStreamingComponentsUnregistrationGranularity` | 2 | 공통 | 프레임 시간 체크 주기당 해제하는 컴포넌트 수 |
 | `wp.Runtime.BlockOnSlowStreaming` | 0 | 데디케이티드 서버 | 셀이 아직 로딩 중이어도 서버 틱(= 모든 플레이어)을 멈추지 않음 |
 | `wp.Runtime.MaxLoadingLevelStreamingCells` | 2 | 데디케이티드 서버 | 동시에 로딩하는 셀 수 제한 → PostLoad / 등록 작업의 burst 축소 |
 
@@ -882,15 +977,15 @@ else
 
 - **우선순위** : `ECVF_SetByProjectSetting`으로 설정하므로 `DefaultEngine.ini [SystemSettings]` · 커맨드라인 · 콘솔 값이 항상 우선합니다. 값이 의도대로 적용되지 않으면 경고 로그가 남습니다.
 - **엔진 버전 방어** : 이 엔진 버전에 없는 CVar는 시작 시 경고를 남기고 건너뜁니다 (엔진 업그레이드로 이름이 바뀌어도 무시되지 않음).
-- **적용 범위** : `wp.Runtime.*` 두 항목은 데디케이티드 서버 프로세스에서만 적용됩니다 (`EProfileScope::ServerOnly`). 클라이언트 / standalone에서는 건드리지 않습니다.
-- **확인** : 시작 로그에 `[Stream] <CVar> = <값> (was <이전 값>)`가 남고, `opt.stream.Dump`는 항목별 현재 값 · 프로파일 값 · 상태(`profile value active` / `DIFFERENT from profile` / `MISSING in this engine version` / `not used by this process`)를 보여 줍니다. `opt.stream.Apply`는 런타임에 다시 적용하고, `opt.stream.ApplyProfile 0`이면 엔진 기본값을 건드리지 않습니다 (첫 월드 시작 시 읽음).
+- **적용 범위** : `wp.Runtime.*` 두 항목은 데디케이티드 서버 프로세스에서만 적용됩니다 (`EProfileScope::ServerOnly`). 클라이언트 / standalone에서는 적용하지 않습니다.
+- **확인** : 시작 로그에 `[Stream] <CVar> = <값> (was <이전 값>)`가 남고, `opt.stream.Dump`는 항목별 현재 값 · 프로파일 값 · 상태(`profile value active` / `DIFFERENT from profile` / `MISSING in this engine version` / `not used by this process`)를 보여 줍니다. `opt.stream.Apply`는 런타임에 다시 적용하고, `opt.stream.ApplyProfile 0`이면 엔진 기본값을 변경하지 않습니다 (첫 월드 시작 시 읽음).
 
 #### ② `UMassBubbleStreamingMonitor` — 고부하 셀 감시
 
 - 모든 game / PIE 월드에 만들어지는 `UTickableWorldSubsystem`입니다 (commandlet 제외). `FLevelStreamingDelegates::OnLevelStreamingStateChanged`로 셀의 상태 변화를 받으며, 이 delegate는 전역이므로 PIE에서 서버와 클라이언트가 한 프로세스에 있어도 **자기 월드의 이벤트만** 처리합니다.
-- **고부하 정의** : 셀이 `Loading` / `MakingVisible` / `MakingInvisible`인 동안입니다. 고부하 셀 집합은 `TWeakObjectPtr`로 들고 있어, 최종 상태 변경 없이 사라진 streaming level이 월드를 영원히 고부하 상태로 만들지 못합니다 (매 Tick 무효 항목을 정리).
-- `IsBusy()` / `GetNumBusyCells()`를 `UCrowdSubsystem`이 읽어 NPC spawn / despawn 예산을 정합니다. `UCrowdSubsystem`은 초기화할 때 `InitializeDependency`로 Monitor를 먼저 만들어 둡니다.
-- 프레임 단위 카운터(상태 변화 수 · 언로드 수 · 고부하 최대치)도 따로 저장합니다. 긴 프레임 안에서 상태 처리가 완료된 셀은 로그를 쓰는 시점에는 이미 고부하 상태가 아니기 때문입니다 (④). CSV에는 `StreamingBusyCells`가 기록됩니다.
+- **고부하 정의** : 셀이 Loading, MakingVisible, MakingInvisible 상태일 때를 고부하로 정의합니다. 고부하 셀 집합은 TWeakObjectPtr로 관리하여, 최종 상태가 변경되지 않은 채 소멸한 Streaming Level로 인해 월드가 영원히 고부하 상태로 유지되는 현상을 방지합니다. 매 Tick마다 무효화된 항목을 자동으로 정리합니다.
+- `IsBusy()` / `GetNumBusyCells()`를 `UCrowdSubsystem`이 읽어 NPC spawn / despawn 시분할 시간을 정합니다. `UCrowdSubsystem`은 초기화할 때 `InitializeDependency`로 Monitor를 먼저 만들어 둡니다.
+- 프레임 단위 카운터(상태 변화 수 · 언로드 수 · 고부하 최대치)도 따로 저장합니다. 긴 프레임 안에서 상태 처리가 완료된 셀은 로그를 쓰는 시점에는 이미 고부하 상태가 아니기 때문입니다 (⑤). CSV에는 `StreamingBusyCells`가 기록됩니다.
 
 #### ③ Quiet GC — 셀 언로드 후 GC를 스트리밍 부하가 없는 시점에 실행
 
@@ -913,10 +1008,64 @@ if (bSpaced && (bQuiet || bOverdue))
 ```
 
 - **로그** : 실행할 때 `[Stream] GC after cell unload: World Partition is quiet (waited N s)` 또는 `waited long enough`가 남아, 어느 경로로 실행됐는지 알 수 있습니다.
-- **GC 측정** : Pre / Post GC delegate로 GC가 game thread를 잡은 시간(락 대기 + reachability analysis), 직전 GC와의 간격, 시작 주체(우리의 Quiet GC / 엔진 · 기타)를 기록해 ④에서 보여 줍니다.
+- **GC 측정** : Pre / Post GC delegate로 GC가 game thread를 잡은 시간(락 대기 + reachability analysis), 직전 GC와의 간격, 시작 주체(우리의 Quiet GC / 엔진 · 기타)를 기록해 ⑤에서 보여 줍니다.
 - **A/B** : `opt.stream.QuietGC 0`이면 이 경로를 끕니다. 엔진 기본 동작과 비교하려면 `s.ForceGCAfterLevelStreamedOut 1`을 함께 지정합니다. 임계값은 `opt.stream.GCQuietSec` / `GCMaxDeferSec` / `GCMinSpacingSec`로 바꿉니다.
 
-#### ④ Hitch 로그 — 원인을 GC / WP / crowd로 구분
+#### ④ Incremental GC — GC 자체를 여러 프레임으로 나눔
+
+③이 GC를 **언제** 시작할지 정한다면, Incremental GC는 시작한 GC가 한 프레임을 통째로 잡지 않도록 GC를 **프레임 단위로 나눕니다.** 엔진 설정이라 코드가 아니라 `Config/DefaultEngine.ini`로 켭니다. ①의 프로파일(`opt.stream.Apply`)이 적용하는 값이 아니므로 `opt.stream.Dump`에는 나오지 않습니다.
+
+```ini
+; Config/DefaultEngine.ini
+[/Script/Engine.GarbageCollectionSettings]
+gc.ActorClusteringEnabled=True
+gc.AllowParallelGC=True
+gc.IncrementalBeginDestroyEnabled=True
+gc.CreateGCClusters=True
+gc.GarbageEliminationEnabled=True
+gc.AssetClustreringEnabled=True
+
+[ConsoleVariables]
+gc.AllowIncrementalReachability=1
+gc.AllowIncrementalGather=1
+gc.IncrementalBeginDestroyTimeLimit=0.002
+gc.IncrementalReachabilityTimeLimit=0.002
+```
+
+| 설정 | 값 | 역할 |
+|---|---|---|
+| `gc.AllowIncrementalReachability` | 1 | Reachability Analysis(도달 가능성 분석)를 한 프레임에 끝내지 않고 시간 제한 단위로 나눠 실행 |
+| `gc.IncrementalReachabilityTimeLimit` | 0.002 | 분석에 프레임당 허용하는 최대 시간 (초, 2 ms) |
+| `gc.AllowIncrementalGather` | 1 | unreachable 객체 수집(Gather)도 나눠 실행 |
+| `gc.IncrementalBeginDestroyEnabled` | True | 객체 파괴(BeginDestroy)를 나눠 처리 |
+| `gc.IncrementalBeginDestroyTimeLimit` | 0.002 | BeginDestroy 처리에 프레임당 허용하는 최대 시간 (초, 2 ms) |
+| `gc.AllowParallelGC` | True | GC 작업을 worker thread에서 병렬로 실행 |
+
+나머지 항목(`gc.*Cluster*` · `gc.GarbageEliminationEnabled`)은 클러스터링과 garbage elimination에 관한 엔진 GC 프로젝트 설정입니다 (Project Settings > Engine > Garbage Collection).
+
+| 프레임 | 월드 틱 (`Tick_Engine`) | GC 작업 (Timers의 Incl) |
+|---|---|---|
+| 1 (Csv 2471) | 12.36 ms | `ConditionalCollectGarbage` 9.98 ms (`ParallelFor` 5.03 ms 포함). `CollectGarbageIncremental` 1회 (1.31 ms), `CollectGarbageFull` 0회 |
+| 2 (Csv 2472) | 2.26 ms | `ConditionalCollectGarbage` 648.7 µs → `IncrementalPurgeGarbage` 646.3 µs (`IncrementalDestroyGarbage` 343 µs) |
+| 3 (Csv 2473) | 1.41 ms | `ConditionalCollectGarbage` 176.5 µs → `IncrementalPurgeGarbage` 174.3 µs (`FMemory::Trim` 172.6 µs) |
+
+<p align="center">
+  <img src="Image/UnrealInsight_GC_Frame_1.PNG" alt="Unreal Insights - GC 1프레임째" width="1135"><br>
+  <sub>1프레임째 (Csv 2471) — GC 시작: 도달성 분석 · 수집, <code>ConditionalCollectGarbage</code> 9.98 ms</sub>
+</p>
+
+<p align="center">
+  <img src="Image/UnrealInsight_GC_Frame_2.PNG" alt="Unreal Insights - GC 2프레임째" width="1128"><br>
+  <sub>2프레임째 (Csv 2472) — <code>IncrementalPurgeGarbage</code> 646.3 µs</sub>
+</p>
+
+<p align="center">
+  <img src="Image/UnrealInsight_GC_Frame_3.PNG" alt="Unreal Insights - GC 3프레임째" width="1126"><br>
+  <sub>3프레임째 (Csv 2473) — <code>IncrementalPurgeGarbage</code> 174.3 µs로 마무리</sub>
+</p>
+- <b>A/B</b> : Incremental GC 없이 비교하려면 `DefaultEngine.ini`에서 `gc.AllowIncrementalReachability` · `gc.AllowIncrementalGather`를 0으로 바꿔 다시 실행하고, 같은 절차(`opt.hitch.LogMs` · Insights)로 측정합니다.
+
+#### ⑤ Hitch 로그 — 원인을 GC / WP / crowd로 구분
 
 `opt.hitch.LogMs N`(> 0)이면 N ms를 넘긴 프레임마다 한 줄을 남깁니다. Tick에 도착하는 delta는 **직전 프레임**의 길이이므로, 방금 발생한 Hitch를 그 시점의 상태와 함께 기록합니다.
 
@@ -925,14 +1074,14 @@ if (bSpaced && (bQuiet || bOverdue))
   | world partition: cells busy now=<n>, peak during the last frame=<n>, state changes=<n>, unloads=<n>
   | last GC held the game thread <ms> ms (lock wait + reachability analysis), started <s> after the previous one,
     started by: our quiet GC / engine / other, GCs seen: <n>, <n> frames ago | GC waiting after unload: yes / no
-  | crowd: regions spawning=<n> despawning=<n> | queues spawn=<n> despawn=<n> | snapshot regions=<n> | bot ops pending=<n>
+  | crowd: regions planning=<n> spawning=<n> despawning=<n> | queues spawn=<n> despawn=<n> | pcg plans pending=<n> | snapshot regions=<n> | bot ops pending=<n>
 ```
 
 (실제로는 한 줄로 출력됩니다.)
 
 - **GC가 원인** : `GC in the last 2 frames: YES`이고 `held the game thread`가 깁니다. 셀 언로드 직후에 `started by: engine / other`인 GC가 보이면 프로파일이 적용되지 않은 것입니다 (`opt.stream.Dump`의 `DIFFERENT from profile`).
 - **World Partition이 원인** : `peak during the last frame` / `state changes`가 큽니다. 셀 활동이 한 프레임 안에 끝나도 `peak`로 남습니다.
-- **NPC spawn / despawn이 원인** : `regions spawning` / `queues`가 차 있습니다 (예산이 부족하거나 `opt.crowd.BudgetedPump 0`).
+- **NPC spawn / despawn이 원인** : `regions spawning` / `queues`가 차 있습니다 (시분할 처리시간이 부족하거나 `opt.crowd.BudgetedPump 0`). `planning` / `pcg plans pending`은 PCG 계획을 기다리는 region 수이며, 그래프 실행이 밀리는지는 `opt.crowd.PCG.Stats`로 봅니다.
 
 이 항목은 엔진의 레벨 스트리밍 · GC 동작에 의존하므로 Automation Test 대상이 아닙니다. 효과 크기는 `opt.hitch.LogMs` 로그와 [계측과 실험 설계](#계측과-실험-설계)의 A/B 스위치로 측정합니다.
 
@@ -971,10 +1120,11 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 
 | 도구 | 사용법 | 볼 수 있는 것 |
 |---|---|---|
-| Stat | 서버 `stat OptCrowd` · 클라이언트 `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble cycle, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` [stat-화면-예시](#stat-화면-예시--stat-optcrowd--stat-optrender) |
+| Stat | 서버 `stat OptCrowd` · 클라이언트 `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble / PCG Plan Pump cycle, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` [stat-화면-예시](#stat-화면-예시--stat-optcrowd--stat-optrender) |
 | Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*`, `Opt.Render.Update` 스코프, Networking Insights (패킷별 `CrowdBubble` / `AgentArray` 비트 수, Iris · legacy 복제 경로 구분 [network-insights-검증-분석](#network-insights-검증-분석)) |
-| CSV Profiler | `csvprofile start` / `csvprofile stop` | 카테고리 `OptCrowd`(`StreamingBusyCells` 포함), `OptRender` (Test 빌드에서도 동작) |
-| 로그 | `opt.crowd.Stats` | region 상태별 개수, LOD tier 분포, viewer 수, spawn/despawn 큐 길이, snapshot region 수, 대기 중인 봇 작업, WP busy 셀 · 마지막 GC 요약, 현재 스위치 값 |
+| CSV Profiler | `csvprofile start` / `csvprofile stop` | 카테고리 `OptCrowd`(`StreamingBusyCells` · `PlansPending` · `WanderClamped` 포함), `OptRender` (Test 빌드에서도 동작) |
+| 로그 | `opt.crowd.Stats` | region 상태별 개수(planning 포함), LOD tier 분포, viewer 수, spawn/despawn 큐 길이, snapshot region 수, 대기 중인 봇 작업, PCG planner 요약, WP busy 셀 · 마지막 GC 요약, 현재 스위치 값 |
+| PCG 로그 | `opt.crowd.PCG.Stats` | planner 상태(그래프 로딩 / ready / FAILED), 큐 · 실행 중 수, 요청 · 성공 · 실패 · timeout · 취소 수, 평균 / 최대 지연 시간 |
 | Hitch 로그 | `opt.hitch.LogMs <ms>` | 임계값을 넘긴 프레임마다 GC(소요 · 간격 · 시작 주체) · WP 셀 활동 · crowd 상태 |
 | 스트리밍 프로파일 | `opt.stream.Dump` | 엔진 streaming CVar 프로파일 항목별 현재 값 · 프로파일 값 · 상태 |
 
@@ -985,7 +1135,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
   <sub>PIE 뷰포트에 <code>stat OptRender</code> · <code>stat OptCrowd</code>를 함께 켠 화면 (Opt Render / Opt Crowd 그룹)</sub>
 </p>
 
-서버 · 클라이언트 로직이 한 프로세스에서 도는 PIE라서 두 그룹이 한 화면에 나옵니다. 이 캡처의 조건은 agent 10,000개 · 뷰어 1명이며, 이전 캡처와는 세션 조건이 달라 값을 직접 비교하지 않습니다. 벤치마크가 아니라 계측이 동작하는지, 값의 규모가 설계와 맞는지 확인하는 용도입니다.
+서버 · 클라이언트 로직이 한 프로세스에서 도는 PIE라서 두 그룹이 한 화면에 나옵니다. 이 캡처의 조건은 agent 10,000개(= region당 400개를 모두 채운 상태) · 뷰어 1명이며, 이전 캡처와는 세션 조건이 달라 값을 직접 비교하지 않습니다. PCG 그래프를 쓰면 agent 수는 그래프가 정하므로(`AgentsPerRegion`은 상한) 이 값과 달라질 수 있습니다. 벤치마크가 아니라 계측이 동작하는지, 값의 규모가 설계와 맞는지 확인하는 용도입니다.
 
 - **Opt Crowd · cycle counters** : `LOD Processor` 0.06 ms, `Movement Processor` 0.05 ms, `Director Tick` ≈ 0 ms (Inclusive Avg). `Snapshot Processor`(평균 0.03 ms, 최대 0.28 ms)와 `Bubble Update`(평균 0.02 ms, 최대 0.18 ms)는 `ReplicationHz`(10 Hz)에만 실행되어 대부분의 프레임에서 CallCount가 0이므로, 실행된 프레임의 비용은 평균이 아니라 최대값으로 봅니다. `Region Spawn Slice` / `Region Despawn Slice`가 비어 있어 이 구간에는 region 생성 · 삭제가 없었습니다.
 - **Opt Crowd · counters** : `Agents Alive` 10,000, `Active Regions` 25(= 400 agent × 25 region, 뷰어 1명의 5×5)입니다. 프레임당 이동 연산을 받은 agent(`Agents Simulated / frame`)는 평균 ≈ 737 (716–754)로, [설계 수치](#설계-수치)의 해석적 추정(≈ 830 / 10,000)과 같은 규모입니다.
@@ -1005,10 +1155,11 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 | `opt.crowd.Replicate` | 1 | `0` = snapshot / bubble 갱신 정지 → **시뮬레이션 비용만 분리** |
 | `opt.crowd.DeadReckoning` | 1 | `0` = 움직이는 agent를 매 tick 재전송 → 대역폭 · 직렬화 비용 |
 | `opt.crowd.ReplicationHz` | 0 | `> 0`이면 프로젝트 설정의 Replication Hz를 덮어씀 |
-| `opt.crowd.BudgetedPump` | 1 | `0` = spawn / despawn을 프레임당 고정 개수로 처리 (시간 예산 없음) → **스트리밍 Hitch 재현** |
+| `opt.crowd.BudgetedPump` | 1 | `0` = spawn / despawn을 프레임당 고정 개수로 처리 (일괄처리) → **스트리밍 Hitch 재현** |
 | `opt.crowd.SnapshotScope` | 1 | `0` = 모든 live region을 snapshot (이전 동작) → snapshot 범위 효과 |
 | `opt.crowd.BotRampSec` | -1 | 봇 생성 / 제거 간격(초). `0` = 한 프레임에 전부 (burst), `< 0` = 프로젝트 설정(`BotRampIntervalSec`) |
 | `opt.crowd.BotActivateCells` | 1 | 이후 생성되는 봇이 셀을 `1` = Activated (플레이어처럼 BeginPlay · 등록 · tick), `0` = Loaded까지만 (가벼운 부하) |
+| `opt.crowd.PCG` | 1 | `0` = 아직 populate되지 않은 region을 PCG 없이 랜덤 배치 → PCG 효과. 이미 populate된 region은 그대로이므로, 비교하려면 `opt.crowd.PCG.Replan`으로 비활성 region을 비운 뒤 다시 방문 |
 | `opt.stream.ApplyProfile` | 1 | `0` = 엔진 streaming CVar 프로파일을 적용하지 않음 (첫 월드 시작 시 읽음) |
 | `opt.stream.QuietGC` | 1 | `0` = 셀 언로드 후 Quiet GC를 예약하지 않음 |
 | `opt.stream.GCQuietSec` | 0.75 | 셀 로딩 / 추가 / 제거가 없는 시간이 이 값 이상이면 "Idle" |
@@ -1016,9 +1167,10 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 | `opt.stream.GCMinSpacingSec` | 5 | Quiet GC 사이의 최소 간격 |
 | `opt.hitch.LogMs` | 0 | `> 0` = 이 시간(ms)을 넘긴 프레임마다 GC / WP / crowd 상태를 로그 |
 | `opt.crowd.Render` (client) | 1 | `0` = NPC 렌더 숨김 → **네트워크 비용만 분리** |
+| `opt.crowd.RenderSmoothing` (client) | 1 | `0` = smoothing 없이 외삽 위치를 그대로 그림 → smoothing 효과 |
 | `opt.crowd.RenderStats` (client) | 0 | `1` = bubble 크기 / 그려진 수 / 최근 1초 내 갱신 수 / 복제 시스템(Iris · legacy)을 화면에 출력 (non-shipping) |
 
-콘솔 명령 (non-shipping): `opt.crowd.Stats` · `opt.crowd.SpawnBots [N=4]` (1–64) · `opt.crowd.ClearBots` · `opt.crowd.Reload` (설정 재로딩, region / grid 크기는 월드 재시작 전까지 유지).
+콘솔 명령 (non-shipping): `opt.crowd.Stats` · `opt.crowd.SpawnBots [N=4]` (1–64) · `opt.crowd.ClearBots` · `opt.crowd.Reload` (설정 재로딩, region / grid 크기는 월드 재시작 전까지 유지) · `opt.crowd.PCG.Stats` (planner 상태 요약) · `opt.crowd.PCG.Replan` (비활성 region의 계획 · 영속 상태를 지워 다시 생성).
 
 스트리밍 / 네트워크 점검 명령: `opt.stream.Apply` (프로파일 재적용) · `opt.stream.Dump` (항목별 현재 값) · `opt.net.Info` (Iris / legacy와 관련 CVar를 로그). 이 명령과 `opt.stream.*` · `opt.hitch.LogMs`는 `UE_BUILD_SHIPPING` 가드가 없어 Shipping 서버에도 컴파일되며, `bUseLoggingInShipping = true`로 로그가 유지됩니다.
 
@@ -1038,6 +1190,11 @@ opt.crowd.TimeSlicing 0
 opt.crowd.LOD 0
 opt.crowd.ParallelMove 0
 opt.crowd.Replicate 0          # 시뮬레이션 비용만 분리
+
+# PCG: planner 상태 확인과 A/B (한 번에 하나만 변경)
+opt.crowd.PCG.Stats            # 그래프 로딩 / ready / FAILED, 큐, 지연 시간
+opt.crowd.PCG 0                # 아직 populate되지 않은 region은 PCG 없이 랜덤 배치
+opt.crowd.PCG.Replan           # 비활성 region의 계획 · 영속 상태를 지움 → 다음에 필요해질 때 현재 설정으로 다시 생성
 
 # 클라이언트
 opt.crowd.Render 0             # 렌더 비용 없이 네트워크 비용만 분리
@@ -1068,14 +1225,27 @@ opt.crowd.Enable 0                 # 크라우드를 끄고 봇만 유지 → �
 
 ## 검증 (Automation Tests)
 
-알고리즘은 header-only 순수 함수(`CrowdMath.h`, `CrowdCellGrid.h`, `CrowdNetMath.h`)로 분리해, 월드 · Mass · 네트워크 연결 없이 테스트합니다.
+알고리즘은 header-only 순수 함수(`CrowdMath.h`, `CrowdCellGrid.h`, `CrowdNetMath.h`, `CrowdWander.h`, `CrowdSmoothing.h`, `CrowdPlan.h`)로 분리해, 월드 · Mass · 네트워크 연결 · PCG 없이 테스트합니다.
 
 | 테스트 케이스 | 핵심 검증 내용 | 주요 대상 |
 |---|---|---|
-| `Crowd.CellGrid` | 대규모 에이전트 생성 시 데이터 유실 및 중복 검증 | 에이전트 누락 방지 |
+| `Crowd.CellGrid` | 대규모 에이전트 생성 시 데이터 유실 및 중복 검증 (brute force와 대조) | 에이전트 누락 방지 |
 | `Crowd.Quantization` | 연산 압축 시 발생하는 오차 및 경계값 안전성 검증 | 오차 최소화 / 정밀도 |
-| `Crowd.DeadReckoning` | 이동 예측 데이터 오차 및 재전송 타이밍 검증 | 클라이언트 예측 정확도 |
+| `Crowd.DeadReckoning` | 외삽 계약(서버 · 클라이언트 공유 상한 3초 + heartbeat 2초), 재전송 임계값, 이동 예측 오차, 메시지 수(< 15 %) 검증 | 클라이언트 예측 정확도 |
+| `Crowd.Smoothing` | 걷는 agent는 지연 없이, 회전은 곡선으로, 정지는 짧은 미끄러짐으로, 보정은 여러 프레임에 걸쳐 그려지는지와 프레임 레이트 독립성 검증 | 클라이언트 표현 |
+| `Crowd.Presentation` | 서버 이동 → 복제 → 클라이언트 smoothing 전 구간을 실제 함수로 돌려, "걷다가 멈추고 되돌아간다"는 증상을 첫 버전에서는 감지하고 현재 버전에서는 걷는 agent가 정지해 보이는 비율 < 1 % · 역방향 점프 0 · 오차 p99 ≤ 40 cm임을 검증 | 보이는 결과 |
+| `Crowd.Interest` | AOI 경계 hysteresis가 진입 / 이탈 횟수를 1/3 이상 줄이는지, 반경이 int16 상한을 넘지 않는지 검증 | 복제 대상 안정성 |
+| `Crowd.Wander.Geometry` | 박스 진입 / 이탈 시간, band 폭, 호가 열린 땅으로 돌아오는지 vs 갇히는지, 좌우 회전 분포 | 배회 모델 기하 |
+| `Crowd.Wander.TimeSlicing` | 1 / 2 / 6 프레임 · 0.5초 단위로 쪼개 걸어도 같은 경로 | time-slicing 무결성 |
+| `Crowd.Wander.Containment` | 300 agent × 300초, 안전 clamp 0회로 region 안에 머물고 band에 갇히지 않음 | region 이탈 방지 |
+| `Crowd.Wander.Recovery` | band 안이나 벽 바로 앞에서 시작해도 빠져나옴 | 복구 |
+| `Crowd.Wander.Smoothness` | 반전(90° 초과) 0회, 평균 회전 완만, 속도 범위 준수, 정지 비율이 모델과 일치 | 움직임 품질 |
+| `Crowd.Wander.Density` | 열린 땅 밀도 균일(±12 %), 경계에 쌓이지 않음 (< 1.25배, 이전 조향 방식은 3.7배) | 밀도 분포 |
 | `Crowd.Math` | 시뮬레이션 난수, 해시 충돌, 경계 규칙의 정확성 검증 | 연산 무결성 |
+| `Crowd.Plan.Filter` | NaN / Inf · density ≤ 0 · 경계 band 안 · region 밖 점 거부, 모든 점의 행방이 합계와 일치 | PCG 점 필터 |
+| `Crowd.Plan.Thinning` | 상한 초과 시 정확히 상한 개수, 점 순서와 무관, 균일, seed가 0인 점도 구분 | PCG 상한 thinning |
+| `Crowd.Plan.Agent` | 계획된 agent의 초기 상태 불변식(속도 범위 · 난수열 ≠ 0 · 정지 · 헤딩), yaw 옵션은 헤딩만 바꿈 | 점 → agent |
+| `Crowd.Plan.Wander` | 계획된 agent(경계 band 바로 앞에 몰린 최악의 경우 포함)가 안전 clamp 없이 1분간 region 안에 머묾 | 계획 ↔ 배회 모델 |
 
 > 테스트 이름의 `MassBubble.` 접두사는 생략했습니다 (전체 이름 예: `MassBubble.Crowd.CellGrid`).
 
@@ -1087,18 +1257,21 @@ TestTrue(TEXT("dead reckoning sends under 15% of the naive messages"),
 
 // 오차 수정이 일어나기 직전 틱까지는 오차가 허용 오차 이내였다가,
 // 이후 |v - vSent| * dt 만큼 오차가 누적되며 커집니다.
-// (예: 220 cm/s의 속도로 달릴 때 180도 급회전을 하면 속도 차이는 440 cm/s가 되며, 
-//  이는 0.1초 짜리 1틱 동안 44 cm의 오차가 발생함을 의미합니다.)
+// (예: 최고 속도 180 cm/s로 걷다 180도 반전하면 속도 차이는 360 cm/s가 되며,
+//  이는 0.1초 짜리 1틱 동안 36 cm의 오차가 발생함을 의미합니다.)
 TestTrue(TEXT("client prediction error stays bounded"),
-	MaxPredictionError < Tolerance + 2.0 * 220.0 * Dt + 5.0);
+	MaxPredictionError < Tolerance + 2.0 * Tuning.MaxSpeedCmPerSec * Dt + 5.0);
 
 // 히스테리시스(Hysteresis) 대조군 설정: 경계면에서 미세한 흔들림(Jitter)이 발생할 때, 
 // 동일한 입력 조건에서 일반적인 반올림 방식을 쓰면 거의 매 스텝마다 값이 Flip 됩니다.
 TestEqual(TEXT("hysteresis: no rebase while jittering on the border"), HysteresisRebases, 0);
 TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), NaiveFlips > 150);
+
+// CrowdPlanTests.cpp — PCG가 점을 어떤 순서로 내놓아도 같은 crowd가 만들어지는지 검증합니다.
+TestTrue(TEXT("the order the graph delivers the points in does not matter"), bSame);
 ```
 
-> Automation Test는 순수 로직의 무결성을 검증합니다. 월드 · Mass · 네트워크가 실제로 동작하는지는 에디터 PIE 캡처로 확인했습니다 — Mass Debugger, Unreal Insights, World Partition 오버레이와 로그, stat 화면([계측과 실험 설계](#계측과-실험-설계)), 프로젝트 설정 화면([설정](#설정)). 복제 경로(Iris / legacy)는 Network Insights 패킷 캡처로 확인했습니다(6장).
+> Automation Test는 순수 로직의 무결성을 검증합니다. 월드 · Mass · 네트워크가 실제로 동작하는지는 에디터 PIE 캡처로 확인했습니다 — Mass Debugger, Unreal Insights, World Partition 오버레이와 로그, stat 화면([계측과 실험 설계](#계측과-실험-설계)), 프로젝트 설정 화면([설정](#설정)). 복제 경로(Iris / legacy)는 Network Insights 패킷 캡처로 확인했습니다(7장). PCG 그래프 실행(Host · Planner)은 에디터에서 `opt.crowd.PCG.Stats`로 확인합니다(3장).
 
 ---
 
@@ -1106,14 +1279,14 @@ TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), 
 
 ### 해석적 추정 (기본 설정)
 
-기본 설정, 뷰어 1명, 균일 agent 밀도를 가정해 **코드 상수에서 도출한 값**입니다. 실측이 아닙니다.
+기본 설정, 뷰어 1명, PCG 없이 region당 400개를 균일하게 배치하는 경우를 가정해 **코드 상수에서 도출한 값**입니다. 실측이 아닙니다.
 
 | 항목 | 값 | 산식 |
 |---|---|---|
-| Agent 밀도 | 0.0244 / m² | 400 / (128 m)² |
-| 활성 agent (뷰어 1명) | 10,000 | `AgentsPerRegion`(400) × 5×5 region |
-| Fragment 메모리 | ≈ 0.56 MB | 56 B × 10,000 |
-| 비활성 region 영속 상태 | ≈ 16 KB / region | `FCrowdSavedAgent` 40 B × 400 |
+| Agent 밀도 | 0.0244 / m² | 400 / (128 m)² (랜덤 배치. PCG를 쓰면 그래프가 정함) |
+| 활성 agent (뷰어 1명) | 10,000 | `AgentsPerRegion`(400) × 5×5 region (PCG를 쓰면 이것이 상한이고, 실제 수는 region별 `min(유효한 점, 400)`의 합) |
+| Fragment 메모리 | ≈ 0.64 MB | 64 B × 10,000 (entity handle 8 B를 더하면 72 B × 10,000 ≈ 0.72 MB) |
+| 비활성 region 영속 상태 | ≈ 19 KB / region (상한) | `FCrowdSavedAgent` 48 B × 400 |
 | LOD 분포(Agent 수) | High ≈ 123 / Medium ≈ 644 / Low ≈ 2,301 / Off ≈ 6,932 | 밀도 × 거리 구간 면적 (40 m / 100 m / 200 m) |
 | 프레임당 실제 이동 연산 | **≈ 830** (기존 10,000) | 123 × 1(=1/1 프레임) + 644 / 2(=1/2 프레임) + 2,301 / 6(=1/6 프레임) |
 | 복제 레코드 | **10 B / agent** | 4 + 2 × 2 + 1 × 2 (기존 52 B) |
@@ -1121,8 +1294,12 @@ TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), 
 | Origin rebase 빈도 | ≈ 200 m 이동당 1회 | 200 m 격자 |
 | 클라이언트 렌더 | Actor 1 / Component 1 | ISM 단일 인스턴스 |
 | Snapshot 대상 region (뷰어 1명) | 최대 16 (활성 25개 중) | (15,000 + 2,000) cm 반경 사각형이 덮는 region (≤ 4 × 4) |
-| NPC spawn / despawn 예산 | 1.0 ms / frame (WP 고부하 시 0.25 ms), batch 64 agent | `SpawnBudgetMs` · `SpawnBudgetBusyMs` · `StructuralBatchSize` |
+| NPC spawn / despawn 시분할 처리시간 | 1.0 ms / frame (WP 고부하 시 0.25 ms), batch 64 agent | `SpawnBudgetMs` · `SpawnBudgetBusyMs` · `StructuralBatchSize` |
+| PCG 그래프 실행 | 동시 최대 2개, 실행당 timeout 20초 | `PCGMaxConcurrent` · `PCGTimeoutSec` |
 | Quiet GC 타이밍 | 0.75초 Idle → 실행, 최대 20초 지연, 최소 5초 간격 | `GCQuietSec` · `GCMaxDeferSec` · `GCMinSpacingSec` |
+| Incremental GC 시간 제한 | 2 ms / frame | `gc.IncrementalReachabilityTimeLimit` · `gc.IncrementalBeginDestroyTimeLimit` (`DefaultEngine.ini`) |
+
+PCG 그래프를 쓰면 밀도가 균일하지 않고 agent 수도 달라지므로, LOD 분포 · 이동 연산 수 · 메모리는 위 식에 실제 agent 수와 분포를 넣어 다시 계산해야 합니다.
 
 <!--
 실측 결과 템플릿 (측정 후 이 주석을 해제하고 값을 채우세요.
@@ -1139,7 +1316,7 @@ TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), 
 | 병렬 이동 | `opt.crowd.ParallelMove` 0 → 1 | `Opt.Crowd.Move` wall time (ms) | | | |
 | Dead reckoning | `opt.crowd.DeadReckoning` 0 → 1 | `Bubble Dirty Items`, 서버 송신량 (KB/s) | | | |
 | 렌더 분리 | `opt.crowd.Render` 0 → 1 (client) | `Crowd Render Update` (ms) | | | |
-| 스트리밍 예산 | `opt.crowd.BudgetedPump` 0 → 1 (`opt.crowd.BotRampSec 0`으로 burst 유발) | 최대 frame time, `[Hitch]` 로그 횟수 | | | |
+| 스트리밍 시분할 처리 | `opt.crowd.BudgetedPump` 0 → 1 (`opt.crowd.BotRampSec 0`으로 burst 유발) | 최대 frame time, `[Hitch]` 로그 횟수 | | | |
 | Quiet GC | `opt.stream.QuietGC` 0 + `s.ForceGCAfterLevelStreamedOut` 1 → Quiet GC | GC가 game thread를 잡은 시간 (`[Hitch]` 로그), 셀 busy 중 GC 횟수 | | | |
 | Snapshot Scope | `opt.crowd.SnapshotScope` 0 → 1 (봇 다수) | `Opt.Crowd.Snapshot` (ms / snapshot), `snapshot regions` | | | |
 -->
@@ -1152,6 +1329,8 @@ TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), 
 
 - **Unreal Engine 5.8** : `MassBubbleServer` / `MassBubbleClient` 타깃은 **소스 빌드 엔진**이 필요합니다.
 - Mass 모듈 : `MassEntity`, `MassCommon`, `MassSimulation`, 그리고 5.8에서 추가된 `MassCore`.
+- **PCG 플러그인** : `.uproject`에서 PCG 플러그인을 활성화합니다 (`MassBubble.Build.cs`가 `PCG` 모듈에 의존). Project Settings > Game > MassBubble Crowd > PCG의 `SpawnGraph`가 비어 있으면 planner는 만들어지지 않고 region은 랜덤으로 채워집니다. 쿠킹된 빌드(데디케이티드 서버 포함)에는 그래프 에셋이 포함되어야 합니다.
+- **GC 설정** : Incremental GC는 `Config/DefaultEngine.ini`의 `gc.*` 값으로 켭니다 (13장 ④).
 - **Push Model 활성** : `[SystemSettings] net.IsPushModelEnabled=1`. 꺼져 있으면 dirty 마킹이 효과가 없고 프로퍼티가 일반 경로로 비교됩니다.
 - **Iris** : `-UseIrisReplication=1`(또는 `net.Iris.UseIrisReplication`)로 켭니다. Iris는 `net.SubObjects.DefaultUseSubObjectReplicationList=1`이 필요하며, `opt.net.Info`가 현재 설정을 로그로 보여 줍니다.
 - World Partition 맵 + 서버 스트리밍 `wp.Runtime.EnableServerStreaming=1`.
@@ -1184,7 +1363,7 @@ MassBubbleClient.exe 127.0.0.1 -log -UseIrisReplication=1
 ### 테스트
 
 ```bash
-# Editor: Session Frontend > Automation > 필터 "MassBubble.Crowd"
+# Editor: Session Frontend > Automation > 필터 "MassBubble.Crowd" (17개 전부) 또는 "MassBubble.Crowd.Plan" (PCG 스폰 계획 4개)
 # Headless:
 UnrealEditor-Cmd MassBubble.uproject -ExecCmds="Automation RunTests MassBubble.Crowd; Quit" -unattended -nullrhi -log
 ```
@@ -1199,14 +1378,28 @@ UnrealEditor-Cmd MassBubble.uproject -ExecCmds="Automation RunTests MassBubble.C
 |---|---|---|---|
 | Regions | `RegionSizeCm` | 12800 | Region 한 변 (WP 런타임 그리드 셀 크기와 맞출 것) |
 | | `ActiveRegionRadius` | 2 | 뷰어 주변 활성 region 반경 (Chebyshev) → 5×5 |
-| | `AgentsPerRegion` | 400 | Region당 agent 수 |
+| | `AgentsPerRegion` | 400 | Region당 agent 수. PCG 그래프를 쓰면 **상한(cap)**: 개수는 그래프가 정하고 초과분은 균일하게 솎음 |
 | | `RegionDeactivateDelaySec` | 10 | despawn 유예 (경계 flicker 방어) |
-| | `MaxSpawnPerFrame` / `MaxDespawnPerFrame` | 500 / 1000 | 프레임당 spawn / despawn 하드 캡 (실제 제한은 아래 Streaming의 시간 예산) |
+| | `MaxSpawnPerFrame` / `MaxDespawnPerFrame` | 500 / 1000 | 프레임당 spawn / despawn 하드 캡 (실제 제한은 아래 Streaming의 시분할 처리시간) |
+| | `WorldSeed` | 1337 | region seed의 기준 (랜덤 배치, PCG 시드, 점 솎음) |
+| PCG | `bUsePCG` | true | 새 region의 시작 위치를 PCG 그래프에 묻기. 월드 시작 때 읽음 (런타임 A/B: `opt.crowd.PCG`) |
+| | `SpawnGraph` | (없음) | region 하나분의 **점**을 출력 노드에 내는 PCG 그래프. 비어 있으면 PCG를 쓰지 않음 |
+| | `PCGMaxConcurrent` | 2 | 동시에 실행하는 그래프 수 (1–16) |
+| | `PCGTimeoutSec` | 20 | 시작 후 이 시간(초)을 넘기면 포기하고 폴백 |
+| | `PCGBoundsHalfHeightCm` | 10000 | 생성 bounds의 높이 (`AgentGroundZ` 위아래). Landscape · 메시를 샘플링하는 그래프에 중요 |
+| | `bPCGUsePointYaw` | false | 점의 회전(yaw)을 시작 방향으로 사용. 끄면 agent별 랜덤 |
+| | `bPCGFallbackToRandom` | true | 그래프가 실패 / timeout이면 랜덤으로 채움. 끄면 그 region은 빈 채로 확정 |
 | LOD | `High` / `Medium` / `LowLODDistanceCm` | 4000 / 10000 / 20000 | tier 경계 (40 / 100 / 200 m) |
 | | `LODHysteresisCm` | 500 | tier 전환 hysteresis |
 | | `High` / `Medium` / `Low` / `OffIntervalFrames` | 1 / 2 / 6 / 0 | 시뮬레이션 주기 (0 = 동결) |
-| Movement | `Min` / `MaxSpeedCmPerSec` | 80 / 220 | wander 속도 범위 |
-| | `Min` / `MaxRetargetSec` | 2 / 6 | 방향 재선택 주기 |
+| Movement | `Min` / `MaxSpeedCmPerSec` | 90 / 180 | agent별 순항 속도 범위 (agent마다 한 번 뽑음) |
+| | `SpeedVariation` | 0.15 | 걷기 구간마다 순항 속도에서 ±15 % |
+| | `Min` / `MaxRetargetSec` | 1.5 / 3.5 | 직선 걷기 구간의 길이 |
+| | `MaxTurnDeg` | 60 | 구간 사이 최대 방향 전환 |
+| | `WallTurnRateDeg` | 60 | region 경계 band 안의 회전 속도 (deg/s). 낮을수록 부드럽지만 band가 넓어짐 (band ≈ 2 × 최대 속도 / 회전율 + 40 cm) |
+| | `IdleChance` | 0.12 | 평균 길이의 걷기 구간이 정지로 바뀔 확률 |
+| | `Min` / `MaxIdleSec` | 1.5 / 5 | 정지 시간 (0.1초 이상) |
+| | `AgentGroundZ` | 0 | 평면 월드: 모든 agent가 걷는 Z |
 | | `MaxStepDeltaSec` | 0.5 | time-slicing 누적 delta 상한 |
 | Replication | `ReplicationHz` | 10 | Snapshot 주기 (1–60) |
 | | `BubbleRadiusCm` | 15000 | AOI 반경 (≤ 21000, int16 불변식) |
@@ -1215,26 +1408,29 @@ UnrealEditor-Cmd MassBubble.uproject -ExecCmds="Automation RunTests MassBubble.C
 | | `NearDistanceCm` | 3000 | near / far 경계 |
 | | `VelocityEpsCmPerSec` | 25 | 속도 변화 재전송 임계 |
 | | `GridCellSizeCm` | 1600 | 공간 격자 셀 크기 |
-| Streaming | `SpawnBudgetMs` / `DespawnBudgetMs` | 1.0 / 1.0 | 프레임당 시간 예산 (ms). batch마다 시계를 확인하며 프레임당 최소 1 batch는 진행 |
-| | `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs` | 0.25 / 0.25 | World Partition 셀이 로딩 / 추가 / 제거 중일 때의 예산 (0 허용, 일반 예산 이하로 clamp) |
+| Streaming | `SpawnBudgetMs` / `DespawnBudgetMs` | 1.0 / 1.0 | 프레임당 시분할 처리시간 (ms). batch마다 시계를 확인하며 프레임당 최소 1 batch는 진행 |
+| | `SpawnBudgetBusyMs` / `DespawnBudgetBusyMs` | 0.25 / 0.25 | World Partition 셀이 로딩 / 추가 / 제거 중일 때의 시분할 처리사간 (0 허용, 일반 처리시간 이하로 clamp) |
 | | `StructuralBatchSize` | 64 | `BatchCreateEntities` / `BatchDestroyEntities` 1회당 agent 수 (8–2048) |
 | | `SnapshotMarginCm` | 2000 | snapshot 범위를 실제 플레이어 bubble 반경 바깥으로 넓히는 여유 |
 | Bots | `BotOrbitRadiusCm` / `BotSpeedCmPerSec` | 60000 / 1500 | virtual viewer 궤도 반경 / 속도 |
 | | `BotRampIntervalSec` | 1 | 봇 생성 / 제거 간격 (초). 0 = 한 프레임에 전부 |
 | Render | `MaxInstances` | 2048 | 최대 인스턴스 수 |
-| | `MaxExtrapolationSec` | 1.5 | 외삽 상한 |
-| | `SmoothingRate` | 15 | 지수 보간 계수 (1/s, 0 = 끔) |
+| | `VelocityEasingRate` | 7 | 그리는 속도가 복제된 속도를 따라가는 빠르기 (1/s, 0 = 끔) |
+| | `CorrectionRate` | 4 | 그리는 위치를 서버 예측 위치로 끌어당기는 빠르기 (1/s) |
+| | `YawRate` | 10 | 이동 방향을 바라보는 빠르기 (1/s) |
+| | `SnapDistanceCm` | 500 | 목표에서 이보다 멀면 미끄러지지 않고 바로 이동 |
 | | `BubbleSearchIntervalSec` | 1 | bubble 도착 전 탐색 주기 |
+| | `AgentMesh` / `AgentMaterial` / `AgentScale` / `PivotOffsetCm` / `bCastShadow` | 엔진 실린더 / 없음 / (0.5, 0.5, 1.8) / 90 / false | agent 외형 (50 cm × 180 cm 실린더) |
 
-Project Settings 화면(기본값, `DefaultGame.ini`에 저장)이며 위 표의 값과 같습니다.
+Project Settings 화면(`DefaultGame.ini`에 저장)입니다. 외삽 상한(`MaxExtrapolationSec` 3초)과 `HeartbeatSec`(2초)은 서버와 클라이언트가 같은 값을 써야 하므로 설정이 아니라 `CrowdNetMath.h`의 상수입니다.
 
 <table>
   <tr>
-    <td align="center" valign="top"><img src="Image/MassBubble_Crowd_Setting1.PNG" alt="MassBubble Crowd 설정 - Regions / LOD" width="410"></td>
+    <td align="center" valign="top"><img src="Image/MassBubble_Crowd_Setting1.PNG" alt="MassBubble Crowd 설정 - Regions / PCG / LOD" width="410"></td>
     <td align="center" valign="top"><img src="Image/MassBubble_Crowd_Setting2.PNG" alt="MassBubble Crowd 설정 - Movement / Replication / Streaming / Bots" width="324"></td>
   </tr>
   <tr>
-    <td align="center"><sub>Game › MassBubble Crowd — Regions · LOD</sub></td>
+    <td align="center"><sub>Game › MassBubble Crowd — Regions · PCG · LOD</sub></td>
     <td align="center"><sub>Game › MassBubble Crowd — Movement · Replication · Streaming · Bots</sub></td>
   </tr>
 </table>

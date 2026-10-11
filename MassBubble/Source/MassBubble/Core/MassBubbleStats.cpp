@@ -7,6 +7,7 @@ DEFINE_STAT(STAT_OptCrowd_LOD);
 DEFINE_STAT(STAT_OptCrowd_Move);
 DEFINE_STAT(STAT_OptCrowd_Snapshot);
 DEFINE_STAT(STAT_OptCrowd_Bubble);
+DEFINE_STAT(STAT_OptCrowd_Plan);
 
 DEFINE_STAT(STAT_OptCrowd_Agents);
 DEFINE_STAT(STAT_OptCrowd_Regions);
