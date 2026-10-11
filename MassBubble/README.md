@@ -1352,8 +1352,8 @@ PCG 그래프를 쓰면 밀도가 균일하지 않고 agent 수도 달라지므�
 
 ### 빌드
 
-- [클라이언트 빌드 다운로드](https://drive.google.com/file/d/1oxyFlrTBqCj0E9axmrUBnkvx0m1OARsp/view?usp=sharing)
-- [데디케이티드 서버 빌드 다운로드](https://drive.google.com/file/d/1MHaeaeesiHfkTWKNaNiU2N-Zf7Ecosye/view?usp=sharing)
+- 클라이언트 빌드 : [다운로드](https://drive.google.com/file/d/1oxyFlrTBqCj0E9axmrUBnkvx0m1OARsp/view?usp=sharing)
+- 데디케이티드 서버 빌드 : [다운로드](https://drive.google.com/file/d/1MHaeaeesiHfkTWKNaNiU2N-Zf7Ecosye/view?usp=sharing)
 
 ```bash
 # 소스 빌드 엔진 루트 기준 (경로는 환경에 맞게 수정)

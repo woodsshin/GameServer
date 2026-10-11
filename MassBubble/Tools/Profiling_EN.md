@@ -1,6 +1,6 @@
 # MassBubble Server A/B Matrix Profiling and Performance Analysis Report
 
-This document provides a detailed analysis of the server performance and optimization effects of the crowd simulation system, based on 3-iteration aggregated data (`summary_agg.csv`, total 33 cases) of the Dedicated Server A/B matrix collected via the `Run-AB.ps1` script.
+This document provides a detailed analysis of the server performance and optimization effects of the crowd simulation system, based on 3-iteration aggregated data (`summary_agg.csv`, total 33 cases) of the Dedicated Server A/B matrix collected via the [`Run-AB.ps1`](./Run-AB.ps1) script.
 
 ---
 
