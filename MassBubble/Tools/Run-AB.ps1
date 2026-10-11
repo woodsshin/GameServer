@@ -1,40 +1,40 @@
 ﻿<#
- MassBubble A/B 매트릭스 러너 (PROFILING.md 3절)
+ MassBubble A/B matrix runner (PROFILING.md section 3)
 
- 예)  .\Run-AB.ps1 -ServerExe D:\Pkg\WindowsServer\MassBubbleServer.exe `
+ e.g.  .\Run-AB.ps1 -ServerExe D:\Pkg\WindowsServer\MassBubbleServer.exe `
                    -ClientExe D:\Pkg\Windows\MassBubble.exe `
                    -CsvDir   D:\Pkg\WindowsServer\MassBubble\Saved\Profiling\CSV `
                    -Cases A0,A1,A2
 
- 케이스마다: 서버 기동 -> (csvprofile frames=N) -> 완료 대기 -> 종료 -> CSV에서 워밍업 제외 후 평균/p99 집계.
- 결과: <Out>\summary.csv, <Out>\<케이스>_b<봇>_c<클라>.csv / .log
+ For each case: start server -> (csvprofile frames=N) -> wait for completion -> shut down -> exclude warmup from the CSV, then aggregate mean/p99.
+ Output: <Out>\summary.csv, <Out>\<case>_b<bots>_c<clients>.csv / .log
 
- 반복 측정:  -Repeat 3                 선택한 모든 케이스를 3회씩 (파일명 끝에 _r1 _r2 _r3)
-             -Cases A10_A3b_x3         A0 + A10_legacy + A3b_ts0_par1 + A3b_ts0_par0 를 3회씩 (약 12회 x 2.2분 = 약 27분)
- 반복 실행은 케이스를 번갈아 돈다 (A0,A10,par1,par0, A0,A10,... ): 시간에 따른 드리프트가 한 케이스에만 몰리지 않게.
- 결과: summary.csv (실행마다 1행) + summary_agg.csv (케이스별 mean/min/max/sd) + 비교 결과(콘솔)
+ Repeating:  -Repeat 3                 Runs every selected case 3 times (suffix _r1 _r2 _r3 on file names)
+             -Cases A10_A3b_x3         A0 + A10_legacy + A3b_ts0_par1 + A3b_ts0_par0, 3 times each (about 12 runs x 2.2 min = about 27 min)
+ Repeated runs interleave the cases (A0,A10,par1,par0, A0,A10,... ) so that drift over time does not concentrate on a single case.
+ Output: summary.csv (one row per run) + summary_agg.csv (mean/min/max/sd per case) + comparison results (console)
 
- GC / PCG 케이스 (PROFILING.md 6.2의 후속 측정)
-   Incremental GC : -Cases GC_x3 | GC_full_x3 | GC_churn_x3     (GC_inc_on 대 GC_inc_off, 구성요소별 분해, 시간 제한, 셀 교체가 잦은 부하)
-   PCG 스폰 계획  : -Cases PCG_x3 | PCG_fill_x3 | PCG_burst_x3 -SpawnGraph /Game/PCG_MassAgentSpawner.PCG_MassAgentSpawner
-   GC_* 케이스는 gc.* CVar를 -ExecCmds로 설정하고 같은 CVar를 다시 조회해서 서버 로그에 값을 남긴다.
-   값이 로그에서 확인되지 않으면 경고한다 (LogMustHave). PCG 케이스도 "spawn graph ready"를 확인한다.
-   OptCrowd/GCCount, PlansOk, PlanLatency*Ms 열은 MassBubble-GC-PCG-csv-stats.patch를 적용한 빌드에만 있다 (없으면 n/a).
+ GC / PCG cases (follow-up measurements to PROFILING.md 6.2)
+   Incremental GC : -Cases GC_x3 | GC_full_x3 | GC_churn_x3     (GC_inc_on vs GC_inc_off, per-component breakdown, time limit, load with frequent cell swaps)
+   PCG spawn plan : -Cases PCG_x3 | PCG_fill_x3 | PCG_burst_x3 -SpawnGraph /Game/PCG_MassAgentSpawner.PCG_MassAgentSpawner
+   GC_* cases set the gc.* CVars via -ExecCmds and query the same CVars again so the values are written to the server log.
+   If a value cannot be confirmed in the log, a warning is issued (LogMustHave). PCG cases also check for "spawn graph ready".
+   OptCrowd/GCCount, PlansOk, PlanLatency*Ms columns exist only in builds with MassBubble-GC-PCG-csv-stats.patch applied (n/a otherwise).
 #>
 param(
 	[Parameter(Mandatory)] [string]$ServerExe,
-	[string]$ClientExe = "",                       # 비우면 클라이언트 없이 실행 (A4~A7은 클라이언트 필요!)
-	[Parameter(Mandatory)] [string]$CsvDir,        # 서버가 CSV를 쓰는 Saved\Profiling\CSV
+	[string]$ClientExe = "",                       # If empty, run without a client (A4~A7 need a client!)
+	[Parameter(Mandatory)] [string]$CsvDir,        # Saved\Profiling\CSV, where the server writes CSVs
 	[string]$Map = "/Game/Maps/L_MassBubbleWorld",
 	[int]$Bots = 8,
 	[int]$Clients = 1,
-	[int]$Warmup = 30,                             # 초. 봇 램프(봇수 x BotRampSec)보다 길어야 함
-	[int]$Duration = 60,                           # 초. 측정 구간
-	[int]$ServerFps = 30,                          # 서버 틱레이트 (frames 계산용)
+	[int]$Warmup = 30,                             # Seconds. Must be longer than the bot ramp (bot count x BotRampSec)
+	[int]$Duration = 60,                           # Seconds. Measurement window
+	[int]$ServerFps = 30,                          # Server tick rate (used to compute frames)
 	[string[]]$Cases = @("A0"),
-	[int]$Repeat = 1,                              # 각 케이스를 몇 번 반복할지 (그룹 케이스는 자체 반복 수 사용)
+	[int]$Repeat = 1,                              # How many times to repeat each case (group cases use their own repeat count)
 	[string]$Out = "ab_results",
-	[string]$SpawnGraph = ""                       # PCG 케이스용 그래프 에셋 경로 (예: /Game/PCG_MassAgentSpawner.PCG_MassAgentSpawner). 비우면 DefaultGame.ini 값 사용
+	[string]$SpawnGraph = ""                       # Graph asset path for PCG cases (e.g. /Game/PCG_MassAgentSpawner.PCG_MassAgentSpawner). If empty, the DefaultGame.ini value is used
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,19 +42,19 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Out = (Resolve-Path $Out).Path   # absolute: [IO.File] APIs do not follow the PowerShell location
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 
-# Cmds: 서버 -ExecCmds (런타임 CVar) / Args: 서버 명령줄 (재시작이 필요한 항목, ini 오버라이드)
+# Cmds: server -ExecCmds (runtime CVars) / Args: server command line (items that need a restart, ini overrides)
 $GameIni = "-ini:Game:[/Script/MassBubble.CrowdSettings]"
 
-# PCG 켜기: bUsePCG는 월드 시작 때 읽으므로 CVar가 아니라 서버 명령줄(ini 오버라이드)로 넘긴다.
+# PCG enabling: bUsePCG is read at world start, so pass it via the server command line (ini override), not a CVar.
 $PcgArgs = @("${GameIni}:bUsePCG=True")
 if ($SpawnGraph -ne "") { $PcgArgs += "${GameIni}:SpawnGraph=$SpawnGraph" }
 $PcgHave    = @('\[PCG_MassAgentSpawner\] spawn graph ready', '\[PCG_MassAgentSpawner\] first plan arrived')
 $PcgNotHave = @('did not finish within', 'run failed or was cancelled', 'could not be loaded', 'could not be requested', 'no Spawn Graph is set')
 
-# Incremental GC 케이스. Reach / Gather / BeginDestroy는 0 또는 1.
-#   gc.AllowIncrementalReachability, gc.AllowIncrementalGather, gc.IncrementalBeginDestroyEnabled (+ 시간 제한 CVar)
-# 값 없이 CVar 이름만 실행하면 현재 값이 로그에 찍힌다. 스크립트가 그 줄을 찾아 설정이 실제로 적용됐는지 확인한다.
-# opt.hitch.LogMs 40: 서버 프레임이 33.3 ms로 고정이라 그 이상일 때만 [Hitch] 줄이 남는다.
+# Incremental GC cases. Reach / Gather / BeginDestroy are 0 or 1.
+#   gc.AllowIncrementalReachability, gc.AllowIncrementalGather, gc.IncrementalBeginDestroyEnabled (+ time-limit CVar)
+# Running just the CVar name without a value prints its current value to the log. The script finds that line to verify the setting was actually applied.
+# opt.hitch.LogMs 40: the server frame is fixed at 33.3 ms, so a [Hitch] line is logged only for frames at or above that threshold.
 function New-GcCase([int]$Reach, [int]$Gather, [int]$BeginDestroy, $LimitSec = $null, [hashtable]$Extra = @{}) {
 	$Cmds = @("gc.AllowIncrementalReachability $Reach", "gc.AllowIncrementalGather $Gather", "gc.IncrementalBeginDestroyEnabled $BeginDestroy")
 	if ($null -ne $LimitSec) {
@@ -67,7 +67,7 @@ function New-GcCase([int]$Reach, [int]$Gather, [int]$BeginDestroy, $LimitSec = $
 	$Case = @{
 		Cmds     = $Cmds
 		Args     = @()
-		Duration = 90      # GC는 5-9초 간격이라 60초 구간에는 표본이 적다
+		Duration = 90      # GCGC runs every 5-9 seconds, so a 60-second window gives few samples
 		LogMustHave = @(
 			('gc\.AllowIncrementalReachability\s*=\s*"?{0}\b' -f $Reach),
 			('gc\.AllowIncrementalGather\s*=\s*"?{0}\b' -f $Gather),
@@ -105,30 +105,30 @@ $Matrix = [ordered]@{
 	"A7_legacy"      = @{ Cmds = @(); Args = @("-UseIrisReplication=0", "-ini:Engine:[SystemSettings]:net.IsPushModelEnabled=0") }
 	"A9_snapall"   = @{ Cmds = @("opt.crowd.SnapshotScope 0"); Args = @() }
 
-	# ---- Incremental GC (엔진 gc.* CVar. 프로젝트 기본값은 DefaultEngine.ini에서 전부 켜짐) ----
-	# GC_inc_on은 "켜짐"을 명시적으로 다시 설정한 기준선이다: ini 값에 기대지 않고 같은 조건으로 비교한다.
+	# ---- Incremental GC (engine gc.* CVars. The project defaults are all enabled in DefaultEngine.ini) ----
+	# GC_inc_onis a baseline with "on" explicitly set again: it does not rely on the ini values, so cases are compared under the same conditions.
 	"GC_inc_on"     = (New-GcCase 1 1 1)
-	"GC_inc_off"    = (New-GcCase 0 0 0)                 # 증분 도달성 분석 + 증분 수집 + 증분 BeginDestroy 전부 끔
-	"GC_off_reach"  = (New-GcCase 0 1 1)                 # 분해: 증분 도달성 분석만 끔
-	"GC_off_gather" = (New-GcCase 1 0 1)                 # 분해: 증분 수집만 끔
-	"GC_off_bd"     = (New-GcCase 1 1 0)                 # 분해: 증분 BeginDestroy만 끔
-	"GC_tl_05ms"    = (New-GcCase 1 1 1 0.0005)          # 시간 제한 0.5 ms (기본 2 ms)
-	"GC_tl_8ms"     = (New-GcCase 1 1 1 0.008)           # 시간 제한 8 ms
-	# 셀 로드/언로드가 잦은 부하: 봇을 빠르게 돌려 GC 횟수를 늘린다
+	"GC_inc_off"    = (New-GcCase 0 0 0)                 # Turn off incremental reachability analysis + incremental gather + incremental BeginDestroy (all)
+	"GC_off_reach"  = (New-GcCase 0 1 1)                 # Breakdown: turn off only incremental reachability analysis
+	"GC_off_gather" = (New-GcCase 1 0 1)                 # Breakdown: turn off only incremental gather
+	"GC_off_bd"     = (New-GcCase 1 1 0)                 # Breakdown: turn off only incremental BeginDestroy
+	"GC_tl_05ms"    = (New-GcCase 1 1 1 0.0005)          # Time limit 0.5 ms (default 2 ms)
+	"GC_tl_8ms"     = (New-GcCase 1 1 1 0.008)           # Time limit 8 ms
+	# Load with frequent cell load/unload: run the bots quickly to increase the number of GC runs
 	"GC_churn_on"   = (New-GcCase 1 1 1 $null @{ Bots = 16; Args = @("${GameIni}:BotSpeedCmPerSec=4000") })
 	"GC_churn_off"  = (New-GcCase 0 0 0 $null @{ Bots = 16; Args = @("${GameIni}:BotSpeedCmPerSec=4000") })
 
-	# ---- PCG 스폰 계획 (PCG_MassAgentSpawnerPlanner). P0 = 랜덤 배치(플래너 없음), P1 = PCG 그래프 ----
+	# ---- PCG spawn plan (PCG_MassAgentSpawnerPlanner). P0 = random placement (no planner), P1 = PCG graph ----
 	"P0_random"     = @{ Cmds = @(); Args = @("${GameIni}:bUsePCG=False"); LogMustNotHave = @('\\[PCG_MassAgentSpawner\\] loading spawn graph') }
 	"P1_pcg"        = @{ Cmds = @(); Args = $PcgArgs;                                              LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
 	"P1_pcg_c1"     = @{ Cmds = @(); Args = ($PcgArgs + @("${GameIni}:PCGMaxConcurrent=1"));       LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
 	"P1_pcg_c8"     = @{ Cmds = @(); Args = ($PcgArgs + @("${GameIni}:PCGMaxConcurrent=8"));       LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
-	# 워밍업 0: 시작 구간(에이전트가 채워지는 시간, Agents T90/T99)을 본다. 램프된 봇 16이 채워지는 데 약 42초
+	# Warmup 0: look at the startup phase (time for agents to fill in, Agents T90/T99). Filling with the ramped 16 bots takes about 42 seconds
 	"P0_random_w0"  = @{ Cmds = @(); Args = @("${GameIni}:bUsePCG=False"); Bots = 16; Warmup = 0; Duration = 90; LogMustNotHave = @('\\[PCG_MassAgentSpawner\\] loading spawn graph') }
 	"P1_pcg_w0"     = @{ Cmds = @(); Args = $PcgArgs;                                              Bots = 16; Warmup = 0; Duration = 90; LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
 	"P1_pcg_c1_w0"  = @{ Cmds = @(); Args = ($PcgArgs + @("${GameIni}:PCGMaxConcurrent=1"));       Bots = 16; Warmup = 0; Duration = 90; LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
 	"P1_pcg_c8_w0"  = @{ Cmds = @(); Args = ($PcgArgs + @("${GameIni}:PCGMaxConcurrent=8"));       Bots = 16; Warmup = 0; Duration = 90; LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
-	# 봇 16을 한꺼번에: 요청이 한 번에 쌓일 때 플래너 대기열과 스폰 지연
+	# All 16 bots at once: planner queue and spawn latency when requests pile up at the same time
 	"P0_random_burst_w0" = @{ Cmds = @("opt.crowd.BotRampSec 0"); Args = @("${GameIni}:bUsePCG=False"); Bots = 16; Warmup = 0; Duration = 90; LogMustNotHave = @('\\[PCG_MassAgentSpawner\\] loading spawn graph') }
 	"P1_pcg_burst_w0"    = @{ Cmds = @("opt.crowd.BotRampSec 0"); Args = $PcgArgs;                      Bots = 16; Warmup = 0; Duration = 90; LogMustHave = $PcgHave; LogMustNotHave = $PcgNotHave }
 }
@@ -137,11 +137,11 @@ $Matrix = [ordered]@{
 # A0 is part of the group because A10_legacy is only meaningful against a baseline measured the same number of times.
 $Groups = @{
 	"A10_A3b_x3" = @{ Cases = @("A0", "A10_legacy", "A3b_ts0_par1", "A3b_ts0_par0"); Repeat = 3 }
-	# Incremental GC. 실행 시간 대략: x3 = 2 x 3 x 3.3분 = 약 20분, full_x3 = 7 x 3 x 3.3분 = 약 70분
+	# Incremental GC. Approximate run time: x3 = 2 x 3 x 3.3 min = about 20 min, full_x3 = 7 x 3 x 3.3 min = about 70 min
 	"GC_x3"       = @{ Cases = @("GC_inc_on", "GC_inc_off"); Repeat = 3 }
 	"GC_full_x3"  = @{ Cases = @("GC_inc_on", "GC_inc_off", "GC_off_reach", "GC_off_gather", "GC_off_bd", "GC_tl_05ms", "GC_tl_8ms"); Repeat = 3 }
 	"GC_churn_x3" = @{ Cases = @("GC_churn_on", "GC_churn_off"); Repeat = 3 }
-	# PCG (-SpawnGraph 필요). fill = 시작 구간, burst = 봇 일시 투입
+	# PCG (-SpawnGraph required). fill = startup phase, burst = bots injected all at once
 	"PCG_x3"       = @{ Cases = @("P0_random", "P1_pcg"); Repeat = 3 }
 	"PCG_fill_x3"  = @{ Cases = @("P0_random_w0", "P1_pcg_w0", "P1_pcg_c1_w0", "P1_pcg_c8_w0"); Repeat = 3 }
 	"PCG_burst_x3" = @{ Cases = @("P0_random_burst_w0", "P1_pcg_burst_w0"); Repeat = 3 }
@@ -167,7 +167,7 @@ $Baselines = @{
 	"P1_pcg_burst_w0" = "P0_random_burst_w0"
 }
 
-# 반복 측정 뒤 비교하는 지표 (Agg의 "<지표> mean/min/max" 열). 해당 열이 없는 쌍에서는 건너뛴다.
+# Metrics compared after repeated measurements (the "<metric> mean/min/max" columns of Agg). Skipped for pairs that lack those columns.
 $CompareMetrics = "GT_ExclusiveSum avg", "GT_ExclusiveSum max", "OptCrowd/GameThread/Move avg", "GTFrames_gt10ms",
                   "Exclusive/GameThread/GarbageCollection avg", "Exclusive/GameThread/GarbageCollection max",
                   "OptCrowd/GameThread/Plan avg", "Agents T90 s"
@@ -181,7 +181,7 @@ function Get-Stat($rows, $col) {
 	return @([Math]::Round($avg, 3), [Math]::Round($p99, 3), [Math]::Round($v[-1], 3))
 }
 
-# 에이전트 수가 최종값(캡처 중 최댓값)의 Frac에 처음 도달한 시각(초). 워밍업 0 케이스에서 의미가 있다.
+# Time (seconds) at which the agent count first reached Frac of its final value (the maximum during capture). Meaningful for warmup-0 cases.
 function Get-FillTime($All, $Fps, $Frac) {
 	$Col = 'OptCrowd/Agents'
 	if (-not ($All[0].PSObject.Properties.Name -contains $Col)) { return "n/a" }
@@ -193,7 +193,7 @@ function Get-FillTime($All, $Fps, $Frac) {
 	return "n/a"
 }
 
-# 누적 카운터의 마지막 행 값 (PlansOk, PlanLatencyAvgMs ...)
+# Value of the last row of a cumulative counter (PlansOk, PlanLatencyAvgMs ...)
 function Get-LastValue($Rows, $Col) {
 	if (-not ($Rows[0].PSObject.Properties.Name -contains $Col)) { return "n/a" }
 	$V = $Rows[$Rows.Count - 1].$Col -as [double]
@@ -201,7 +201,7 @@ function Get-LastValue($Rows, $Col) {
 	return [Math]::Round($V, 3)
 }
 
-# 누적 카운터의 측정 구간 증가량 (마지막 행 - 첫 행). 예: 구간 안에서 GC가 몇 번 돌았는가
+# Increase of a cumulative counter over the measurement window (last row - first row). E.g. how many times GC ran within the window
 function Get-Delta($Rows, $Col) {
 	if (-not ($Rows[0].PSObject.Properties.Name -contains $Col)) { return "n/a" }
 	$First = $Rows[0].$Col -as [double]
@@ -210,7 +210,7 @@ function Get-Delta($Rows, $Col) {
 	return [Math]::Round($Last - $First, 3)
 }
 
-# 서버 로그 검사: 케이스가 이름대로의 조건으로 돌았는지 (CVar가 적용됐는지, PCG 그래프가 로드됐는지) 확인하고 [Hitch] 줄 수를 센다.
+# Server log check: verify the case ran under the conditions its name implies (CVars applied, PCG graph loaded) and count [Hitch] lines.
 function Test-CaseLog($Name, $Case, $LogPath) {
 	$Result = [pscustomobject]@{ Hitches = "n/a" }
 	if (-not (Test-Path -LiteralPath $LogPath)) { Write-Warning "$Name : server log not found: $LogPath (log checks skipped)"; return $Result }
