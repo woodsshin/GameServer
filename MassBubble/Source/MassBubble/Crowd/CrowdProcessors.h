@@ -2,7 +2,11 @@
 
 #include "CoreMinimal.h"
 #include "MassProcessor.h"
+#include "Crowd/CrowdLodTable.h"
 #include "CrowdProcessors.generated.h"
+
+class UCrowdSubsystem;
+struct FCrowdTuning;
 
 /**
  * Execution order inside the PrePhysics Mass phase:
@@ -21,6 +25,7 @@ namespace CrowdGroups
 /**
  * Classifies every agent into a LOD tier from the distance to the nearest viewer.
  * Only 1/4 of the agents are evaluated per frame (bucketed by NetId), and tiers use hysteresis.
+ * The distance is measured against the viewers that can be nearest to the agent's region (Crowd/CrowdLodTable.h).
  * Game thread: it reads the viewer list owned by UCrowdSubsystem.
  */
 UCLASS()
@@ -39,7 +44,13 @@ protected:
 	virtual bool ShouldAllowQueryBasedPruning(const bool bRuntimeMode) const override { return false; }
 
 private:
+	void BuildLodTable(const UCrowdSubsystem& Crowd, const FCrowdTuning& Tuning);
+
 	FMassEntityQuery EntityQuery;
+
+	/** Rebuilt at the start of every Execute. */
+	CrowdLod::FTable LodTable;
+	TArray<FVector2D> LodViewers;
 };
 
 /**

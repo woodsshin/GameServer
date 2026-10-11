@@ -1122,6 +1122,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 |---|---|---|
 | Stat | 서버 `stat OptCrowd` · 클라이언트 `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble / PCG Plan Pump cycle, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` [stat-화면-예시](#stat-화면-예시--stat-optcrowd--stat-optrender) |
 | Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*`, `Opt.Render.Update` 스코프, Networking Insights (패킷별 `CrowdBubble` / `AgentArray` 비트 수, Iris · legacy 복제 경로 구분 [network-insights-검증-분석](#network-insights-검증-분석)) |
+| Memory Insights | LLM 태그 `OptCrowd/*` (Unreal Insights Memory 트레이스) | 태그별 메모리 추이(`OptCrowd` · `OptCrowd/Entities` · `OptCrowd/Grids` · `OptCrowd/Bubble`), Alloc/Free 이벤트 수 [Memory-insights-그래프-분석](#memory-insights-그래프-분석) |
 | CSV Profiler | `csvprofile start` / `csvprofile stop` | 카테고리 `OptCrowd`(`StreamingBusyCells` · `PlansPending` · `WanderClamped` 포함), `OptRender` (Test 빌드에서도 동작) |
 | 로그 | `opt.crowd.Stats` | region 상태별 개수(planning 포함), LOD tier 분포, viewer 수, spawn/despawn 큐 길이, snapshot region 수, 대기 중인 봇 작업, PCG planner 요약, WP busy 셀 · 마지막 GC 요약, 현재 스위치 값 |
 | PCG 로그 | `opt.crowd.PCG.Stats` | planner 상태(그래프 로딩 / ready / FAILED), 큐 · 실행 중 수, 요청 · 성공 · 실패 · timeout · 취소 수, 평균 / 최대 지연 시간 |
@@ -1141,6 +1142,22 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 - **Opt Crowd · counters** : `Agents Alive` 10,000, `Active Regions` 25(= 400 agent × 25 region, 뷰어 1명의 5×5)입니다. 프레임당 이동 연산을 받은 agent(`Agents Simulated / frame`)는 평균 ≈ 737 (716–754)로, [설계 수치](#설계-수치)의 해석적 추정(≈ 830 / 10,000)과 같은 규모입니다.
 - **복제 규모** : `Bubble Items`는 400(= `MaxAgentsPerBubble` 상한)이고, 그중 `Bubble Dirty Items`는 8–19개입니다. 신규로 진입한 agent와 dead reckoning 허용 오차를 넘은 agent만 갱신 대상이 되기 때문입니다. 평균(53.33 / 1.52)은 bubble 갱신이 `ReplicationHz`(10 Hz)로만 일어나 프레임 평균이 낮게 표시된 값입니다.
 - **Opt Render · 클라이언트** : `Crowd Render Update` 0.08 ms (최대 0.18 ms)로 `Agents Drawn` 400개를 ISM 1개로 그립니다.
+
+### Memory Insights 그래프 분석
+
+<p align="center">
+  <img src="Image/MassBubble_MemoryInsight.PNG" alt="Memory Insights - LLM OptCrowd 태그 메모리 추이와 Alloc/Free Event Count" width="1281"><br>
+  <sub>Unreal Insights › Memory Insights — <code>Alloc/Free Event Count</code> · LLM <code>OptCrowd</code> · <code>OptCrowd/Bubble</code> · <code>OptCrowd/Entities</code> · <code>OptCrowd/Grids</code> (약 10분)</sub>
+</p>
+
+LLM(Low Level Memory Tracker) 태그 `OptCrowd/*`의 메모리가 약 10분 동안 어떻게 움직이는지 본 캡처입니다. 실제 메모리 추이가 설계(시분할 스폰, 한 번 확보한 뒤 재사용)와 맞는지 확인하는 용도입니다. LLM은 태그가 붙은 할당만 보여주고 있습니다.
+
+- **`LLM OptCrowd/Entities` — (계단식 상승 후 평형 유지 / Stair-step & Plateau)**
+  - 한 번에 수천 개의 엔티티를 생성하여 메모리 스파이크(Spike)를 유발하는 대신, 프레임당 스폰 예산(Budget)에 맞춰 에이전트를 시분할(Time-sliced)로 점진적 생성함에 따라 계단식으로 우상향하다가 인구가 포화된 시점에 완벽한 수평선(Plateau)을 이룹니다.
+- **`LLM OptCrowd/Grids` · `LLM OptCrowd/Bubble` — 초기 수직 상승 후 수평 유지 (Flatline)**
+  - 공간 분할용 셀 그리드(`FCrowdCellGrid`)와 플레이어별 관심 영역 버블(`ACrowdBubble`)에 필요한 메모리가 초기화 시점에 한 번 확보된 뒤, 추가 동적 할당 없이 재사용(Pooling)되고 있음을 뜻합니다.
+- **`Alloc/Free Event Count` — 안정적인 이벤트 빈도**
+  - 런타임 전반에 걸쳐 할당 / 해제 이벤트가 일정한 빈도로 안정적으로 유지됩니다.
 
 ### A/B 킬스위치 (CVar)
 
@@ -1270,8 +1287,6 @@ TestTrue(TEXT("(for contrast) naive rounding would flip on almost every step"), 
 // CrowdPlanTests.cpp — PCG가 점을 어떤 순서로 내놓아도 같은 crowd가 만들어지는지 검증합니다.
 TestTrue(TEXT("the order the graph delivers the points in does not matter"), bSame);
 ```
-
-> Automation Test는 순수 로직의 무결성을 검증합니다. 월드 · Mass · 네트워크가 실제로 동작하는지는 에디터 PIE 캡처로 확인했습니다 — Mass Debugger, Unreal Insights, World Partition 오버레이와 로그, stat 화면([계측과 실험 설계](#계측과-실험-설계)), 프로젝트 설정 화면([설정](#설정)). 복제 경로(Iris / legacy)는 Network Insights 패킷 캡처로 확인했습니다(7장). PCG 그래프 실행(Host · Planner)은 에디터에서 `opt.crowd.PCG.Stats`로 확인합니다(3장).
 
 ---
 

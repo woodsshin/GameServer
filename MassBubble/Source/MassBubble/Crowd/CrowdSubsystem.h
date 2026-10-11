@@ -6,6 +6,7 @@
 #include "MassEntitySubsystem.h" // provides FMassEntityManager / FMassArchetypeHandle
 #include "Crowd/CrowdTypes.h"
 #include "Crowd/CrowdCellGrid.h"
+#include "Crowd/CrowdPersist.h"
 #include "CrowdSubsystem.generated.h"
 
 struct FCrowdPlanResult;
@@ -44,7 +45,10 @@ struct FCrowdRegion
 
 	TArray<FMassEntityHandle> Entities;
 	/** Persisted state. While Spawning it is the restore source, while Despawning it is being filled. */
-	TArray<FCrowdSavedAgent> Saved;
+	TArray<FCrowdPackedAgent> Saved;
+
+	/** World time when the region became Inactive, or < 0 (see UCrowdSettings::PersistTTLSec). */
+	double InactiveSince = -1.0;
 
 	/**
 	 * True once a spawn plan (PCG) decided the population of this region. From then on Saved is the truth, even when it
@@ -58,6 +62,21 @@ struct FCrowdRegion
 
 	/** Replication snapshot of this region (rebuilt at ReplicationHz by UCrowdSnapshotProcessor). */
 	FCrowdCellGrid Grid;
+};
+
+/** Memory held by the region table. Dead = allocated but not needed by the region's current state. */
+struct FCrowdMemoryStats
+{
+	int32 NumRegions = 0;
+	int32 NumPersistedAgents = 0;
+	int32 NumEvictedRegions = 0;
+	SIZE_T RegionTableBytes = 0;
+	SIZE_T SavedUsedBytes = 0;
+	SIZE_T SavedAllocatedBytes = 0;
+	SIZE_T HandlesUsedBytes = 0;
+	SIZE_T HandlesAllocatedBytes = 0;
+	SIZE_T GridAllocatedBytes = 0;
+	SIZE_T DeadBytes = 0;
 };
 
 /**
@@ -146,6 +165,13 @@ public:
 	int32 GetNumRegionsInState(ECrowdRegionState State) const;
 	void DumpStats() const;
 
+	/** Region table access for the LOD bounds. A region has entities while it is Spawning, Active or Despawning. */
+	int32 GetNumRegionSlots() const { return Regions.Num(); }
+	bool GetLiveRegionCoord(int32 Slot, FIntPoint& OutCoord) const;
+
+	FCrowdMemoryStats GetMemoryStats() const;
+	FString GetMemorySummary() const;
+
 	/** One line: region states, queues, snapshot scope, pending bot operations. Used by the hitch log. */
 	FString GetDebugSummary() const;
 
@@ -176,6 +202,9 @@ private:
 	int32 SpawnSlice(FCrowdRegion& Region, int32 Budget);
 	int32 DespawnSlice(FCrowdRegion& Region, int32 Budget);
 	void PumpRegionJobs();
+	void ForgetRegion(FCrowdRegion& Region);
+	int32 EvictStalePersistence(double Now);
+	void PublishMemoryStats();
 	void TickBotRamp(float DeltaSeconds);
 	FCrowdSavedAgent MakeAgent(const FCrowdRegion& Region, int32 Index);
 	FMassArchetypeHandle GetAgentArchetype();
@@ -192,6 +221,10 @@ private:
 	TSet<FIntPoint> WantedScratch;
 	TArray<int32> SpawnQueue;
 	TArray<int32> DespawnQueue;
+
+	/** Reused by SpawnSlice and ApplyPlan: a slice allocates nothing once they have grown. */
+	TArray<FMassEntityHandle> SpawnScratch;
+	TArray<FCrowdSavedAgent> PlanScratch;
 
 	/** Tells us whether World Partition is busy (spawn / despawn budgets shrink then). Null in commandlets. */
 	TWeakObjectPtr<UMassBubbleStreamingMonitor> Monitor;
@@ -220,6 +253,8 @@ private:
 	float CachedGridCellSizeCm = 1600.f;
 	float RegionEvalAccumulator = 0.f;
 	float SnapshotAccumulator = 0.f;
+	float MemorySampleAccumulator = 0.f;
+	int32 NumEvictedRegions = 0;
 	bool bSnapshotDue = false;
 	uint32 SnapshotSerial = 0;
 };

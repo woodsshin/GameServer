@@ -38,6 +38,13 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Mesh")
 	bool bCastShadow = false;
 
+	/**
+	 * Request the mesh and material when the world starts instead of when the first bubble arrives. Costs their
+	 * memory in worlds without a crowd, e.g. menus.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Mesh")
+	bool bPrewarmAssets = true;
+
 	/** Hard cap on drawn instances; the bubble holds at most MaxAgentsPerBubble anyway. */
 	UPROPERTY(Config, EditAnywhere, Category = "Presentation", meta = (ClampMin = "1", ClampMax = "20000"))
 	int32 MaxInstances = 2048;

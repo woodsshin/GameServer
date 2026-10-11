@@ -33,9 +33,14 @@ public:
 		Order.Reset();
 	}
 
-	void BeginBuild()
+	/** ExpectedAgents > 0 reserves the agent array once instead of growing it while the snapshot fills it. */
+	void BeginBuild(int32 ExpectedAgents = 0)
 	{
 		Agents.Reset();
+		if (ExpectedAgents > Agents.Max())
+		{
+			Agents.Reserve(ExpectedAgents);
+		}
 	}
 
 	void Add(const FVector2D& Pos, const FVector2f& Vel, uint32 NetId)
@@ -120,6 +125,25 @@ public:
 		{
 			FMemory::Memzero(CellStart.GetData(), sizeof(int32) * CellStart.Num());
 		}
+	}
+
+	/** Frees the buffers of a region without agents. The grid stays usable: the next build allocates again. */
+	void Release()
+	{
+		Agents.Empty();
+		Order.Empty();
+		CellOfAgent.Empty();
+		Cursor.Empty();
+		if (CellStart.Num() > 0)
+		{
+			FMemory::Memzero(CellStart.GetData(), sizeof(int32) * CellStart.Num());
+		}
+	}
+
+	SIZE_T GetAllocatedSize() const
+	{
+		return Agents.GetAllocatedSize() + CellStart.GetAllocatedSize() + Order.GetAllocatedSize()
+			+ CellOfAgent.GetAllocatedSize() + Cursor.GetAllocatedSize();
 	}
 
 private:

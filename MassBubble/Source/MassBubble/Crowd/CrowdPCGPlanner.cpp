@@ -1,5 +1,6 @@
 #include "Crowd/CrowdPCGPlanner.h"
 
+#include "Core/MassBubbleBoot.h"
 #include "Crowd/CrowdPCGHost.h"
 #include "Crowd/CrowdSettings.h"
 #include "Crowd/CrowdSubsystem.h"
@@ -33,6 +34,7 @@ bool UCrowdPCGPlanner::Initialize()
 
 	State = EState::Loading;
 	UE_LOG(LogMassBubble, Log, TEXT("[CrowdPCG] loading spawn graph '%s'"), *GraphPath.ToString());
+	MassBubbleBoot::Mark(TEXT("PCG.GraphRequested"));
 	return true;
 }
 
@@ -71,6 +73,7 @@ void UCrowdPCGPlanner::PollGraphLoad()
 	Graph = Loaded;
 	State = EState::Ready;
 	UE_LOG(LogMassBubble, Log, TEXT("[CrowdPCG] spawn graph ready: %s"), *GetNameSafe(Loaded));
+	MassBubbleBoot::Mark(TEXT("PCG.GraphReady"));
 }
 
 void UCrowdPCGPlanner::Request(const FCrowdPlanRequest& InRequest)

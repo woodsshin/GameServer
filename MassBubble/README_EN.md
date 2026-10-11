@@ -1,8 +1,8 @@
-# MassBubble - World Partition + Mass Entity Multiplayer Optimization (UE 5.8, C++)
+# MassBubble - World Partition + PCG + Mass Entity Multiplayer Optimization (UE 5.8, C++)
 
 **A large-scale dedicated server optimization sample for Unreal Engine 5.8**
 
-Server-authoritative **Mass Entity** simulation · per-player **AOI (Area of Interest) replication** · client-side **ISM batched rendering**
+Server-authoritative **PCG** based **Mass Entity** simulation · per-player **AOI (Area of Interest) replication** · client-side **ISM batched rendering**
 
 ![Unreal Engine 5.8](https://img.shields.io/badge/Unreal%20Engine-5.8-0E1128?logo=unrealengine&logoColor=white)
 ![Target](https://img.shields.io/badge/Target-Dedicated%20Server-2ea44f)
@@ -184,7 +184,7 @@ The captures below show the Mass Debugger in editor PIE, confirming that Mass be
   <sub>Mass Debugger › Fragments (before the <code>Coordinate Space</code> change · 1,600 entities)</sub>
 </p>
 
-- **All four fragments are attached to the same entity set**: the `Crowd Id` · `Location` · `Motion` · `LOD` fragments all sit on the same single archetype, and the entity count matches the Archetypes tab (the same row repeats in the list, but the values are identical). The Fragments capture above was taken before the `Create Points Grid` > `Coordinate Space` of the PCG graph was changed to `Origin Component` and shows 1,600 entities; afterwards the count is 10,000, as in the Archetypes capture ([PCG Spawn Plans](#3-pcg-spawn-plans)).
+- **All four fragments are attached to the same entity set**: the `Crowd Id` · `Location` · `Motion` · `LOD` fragments all sit on the same single archetype, and the entity count matches the Archetypes tab (the same row repeats in the list, but the values are identical).
 
 <p align="center">
   <img src="Image/MassDebugger_Entities.PNG" alt="Mass Debugger - Entities" width="560"><br>
@@ -1017,8 +1017,6 @@ With `opt.hitch.LogMs N` (> 0), one line is logged for every frame longer than N
   | crowd: regions planning=<n> spawning=<n> despawning=<n> | queues spawn=<n> despawn=<n> | pcg plans pending=<n> | snapshot regions=<n> | bot ops pending=<n>
 ```
 
-(In practice it is printed on a single line.)
-
 - **GC is the cause**: `GC in the last 2 frames: YES` and `held the game thread` is long. If a GC with `started by: engine / other` shows up right after a cell unload, the profile has not been applied (`DIFFERENT from profile` in `opt.stream.Dump`).
 - **World Partition is the cause**: `peak during the last frame` / `state changes` are large. Even if the cell activity finished within a single frame, it remains as `peak`.
 - **NPC spawn / despawn is the cause**: `regions spawning` / `queues` are filled (the budget is insufficient, or `opt.crowd.BudgetedPump 0`). `planning` / `pcg plans pending` count the regions waiting for a PCG plan; whether graph runs are backing up is seen with `opt.crowd.PCG.Stats`.
@@ -1063,6 +1061,7 @@ OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
 |---|---|---|
 | Stat | Server `stat OptCrowd` · client `stat OptRender` | Director / Spawn / Despawn / LOD / Move / Snapshot / Bubble / PCG Plan Pump cycles, `Agents Alive`, `Active Regions`, `Agents Simulated / frame`, `Bubble Items`, `Bubble Dirty Items`, `Agents Drawn` (screen example below) |
 | Unreal Insights | `-trace=cpu,net,frame` | `Opt.Crowd.*` and `Opt.Render.Update` scopes, Networking Insights (per-packet `CrowdBubble` / `AgentArray` bit counts, distinguishing the Iris · legacy replication path — captures in §7) |
+| Memory Insights | LLM tags `OptCrowd/*` (Memory trace in Unreal Insights) | Per-tag memory over time (`OptCrowd` · `OptCrowd/Entities` · `OptCrowd/Grids` · `OptCrowd/Bubble`), Alloc/Free event count (capture and analysis below) |
 | CSV Profiler | `csvprofile start` / `csvprofile stop` | Categories `OptCrowd` (including `StreamingBusyCells`, `PlansPending` and `WanderClamped`) and `OptRender` (also works in Test builds) |
 | Log | `opt.crowd.Stats` | Count per region state (planning included), LOD tier distribution, viewer count, spawn / despawn queue lengths, snapshot region count, pending bot operations, PCG planner summary, WP busy cells · last GC summary, current switch values |
 | PCG Log | `opt.crowd.PCG.Stats` | Planner state (graph loading / ready / FAILED), queued and running counts, requested · ok · failed · timed out · cancelled counts, average / max latency |
@@ -1082,6 +1081,22 @@ Because PIE runs the server and client logic in one process, both groups appear 
 - **Opt Crowd · counters**: `Agents Alive` is 10,000 and `Active Regions` is 25 (= 400 agents × 25 regions, the 5×5 of one viewer). The agents that received a movement update per frame (`Agents Simulated / frame`) average ≈ 737 (716–754), on the same scale as the analytical estimate (≈ 830 / 10,000) in [Design Figures](#design-figures).
 - **Replication scale**: `Bubble Items` is 400 (= the `MaxAgentsPerBubble` cap), and of those `Bubble Dirty Items` is 8–19. Only newly entered agents and agents that exceeded the dead-reckoning tolerance become update targets. The averages (53.33 / 1.52) look low because the bubble update happens only at `ReplicationHz` (10 Hz), which pulls the per-frame average down.
 - **Opt Render · client**: `Crowd Render Update` is 0.08 ms (max 0.18 ms), and `Agents Drawn` 400 agents are drawn with one ISM.
+
+### Memory Insights Graph Analysis — LLM Tags
+
+<p align="center">
+  <img src="Image/MassBubble_MemoryInsight.PNG" alt="Memory Insights - memory over time of the LLM OptCrowd tags and Alloc/Free Event Count" width="1281"><br>
+  <sub>Unreal Insights › Memory Insights — <code>Alloc/Free Event Count</code> · LLM <code>OptCrowd</code> · <code>OptCrowd/Bubble</code> · <code>OptCrowd/Entities</code> · <code>OptCrowd/Grids</code></sub>
+</p>
+
+This capture follows the memory of the LLM (Low Level Memory Tracker) tags `OptCrowd/*` for about 10 minutes. It checks that the memory behaves the way the design says (time-sliced spawning, allocate once and then reuse). LLM shows only tagged allocations, so this is not the memory of the whole process.
+
+- **`LLM OptCrowd/Entities` — stair-step rise, then a plateau**
+  - Instead of creating thousands of entities at once and causing a memory spike, agents are created gradually, time-sliced to the per-frame spawn budget. The memory therefore climbs in steps and, once the population is saturated, settles into a near-flat plateau.
+- **`LLM OptCrowd/Grids` · `LLM OptCrowd/Bubble` — one early vertical rise, then a flat line**
+  - The memory for the spatial cell grid (`FCrowdCellGrid`) and the per-player area-of-interest bubble (`ACrowdBubble`) is acquired once at initialization and then reused (pooled) without further dynamic allocation.
+- **`Alloc/Free Event Count` — a steady event rate**
+  - Allocation / free events stay at a steady rate throughout the run.
 
 ### A/B Kill Switches (CVars)
 
@@ -1206,8 +1221,6 @@ TestTrue(TEXT("(Baseline Contrast) Naive rounding would trigger over 150 thrashi
 // CrowdPlanTests.cpp — the same crowd comes out whatever order the PCG graph delivers its points in.
 TestTrue(TEXT("the order the graph delivers the points in does not matter"), bSame);
 ```
-
-> The Automation Tests verify the integrity of the pure logic. Whether the world, Mass and networking actually work was checked with editor PIE captures — the Mass Debugger, Unreal Insights, the World Partition overlay and log, the stat screen ([Instrumentation and Experiment Design](#instrumentation-and-experiment-design)), and the project settings screen ([Configuration](#configuration)). The replication path (Iris / legacy) was checked with Network Insights packet captures (§7). The PCG graph run itself (host and planner) is checked in the editor with `opt.crowd.PCG.Stats` (§3).
 
 ---
 

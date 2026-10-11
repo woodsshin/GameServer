@@ -39,6 +39,7 @@ struct FCrowdTuning
 	int32 ActiveRegionRadius = 2;          // 2 => 5x5 regions around every viewer
 	int32 AgentsPerRegion = 400;
 	float RegionDeactivateDelaySec = 10.f;
+	float PersistTTLSec = 0.f;             // how long an unwanted region keeps its persisted population, 0 = for ever
 	int32 MaxSpawnPerFrame = 500;          // spawn time-slicing budget (hard cap, the wall clock budget below usually hits first)
 	int32 MaxDespawnPerFrame = 1000;       // despawn time-slicing budget (hard cap)
 	int32 WorldSeed = 1337;

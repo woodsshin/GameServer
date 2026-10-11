@@ -4,6 +4,7 @@
 #include "CrowdRenderSettings.h"
 #include "MassBubbleRender.h"
 
+#include "Core/MassBubbleBoot.h"
 #include "Core/MassBubbleRuntimeConfig.h"
 #include "Crowd/CrowdSettings.h"
 #include "Net/CrowdBubble.h"
@@ -73,8 +74,24 @@ bool UCrowdRenderSubsystem::DoesSupportWorldType(const EWorldType::Type WorldTyp
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 }
 
+void UCrowdRenderSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+{
+	Super::Initialize(Collection);
+
+	BubbleBeginPlayHandle = ACrowdBubble::OnBubbleBeginPlay().AddUObject(this, &UCrowdRenderSubsystem::HandleBubbleBeginPlay);
+
+	const UCrowdRenderSettings* Settings = GetDefault<UCrowdRenderSettings>();
+	if (Settings->bPrewarmAssets)
+	{
+		RequestAssets(*Settings);
+	}
+}
+
 void UCrowdRenderSubsystem::Deinitialize()
 {
+	ACrowdBubble::OnBubbleBeginPlay().Remove(BubbleBeginPlayHandle);
+	BubbleBeginPlayHandle.Reset();
+
 	// The transient host actor dies with the world; just drop our references.
 	Host = nullptr;
 	Instances = nullptr;
@@ -92,6 +109,44 @@ TStatId UCrowdRenderSubsystem::GetStatId() const
 	RETURN_QUICK_DECLARE_CYCLE_STAT(UCrowdRenderSubsystem, STATGROUP_Tickables);
 }
 
+void UCrowdRenderSubsystem::HandleBubbleBeginPlay(ACrowdBubble* InBubble)
+{
+	if (InBubble == nullptr || InBubble->GetWorld() != GetWorld())
+	{
+		return;
+	}
+
+	// Look for the local bubble on the next tick instead of waiting for the polling interval.
+	NextBubbleSearchTime = 0.0;
+	RequestAssets(*GetDefault<UCrowdRenderSettings>());
+}
+
+void UCrowdRenderSubsystem::RequestAssets(const UCrowdRenderSettings& Settings)
+{
+	// Requested once, loaded in the background; the crowd simply appears a few frames later.
+	if (AssetHandle.IsValid() || bHostFailed)
+	{
+		return;
+	}
+
+	TArray<FSoftObjectPath> Paths;
+	Paths.Add(Settings.AgentMesh.ToSoftObjectPath());
+	if (!Settings.AgentMaterial.IsNull())
+	{
+		Paths.Add(Settings.AgentMaterial.ToSoftObjectPath());
+	}
+
+	AssetHandle = StreamableManager.RequestAsyncLoad(MoveTemp(Paths));
+	if (!AssetHandle.IsValid())
+	{
+		UE_LOG(LogMassBubbleRender, Error, TEXT("AgentMesh '%s' could not be requested - the crowd will not be drawn."),
+			*Settings.AgentMesh.ToString());
+		bHostFailed = true;
+		return;
+	}
+	OPT_BOOT_ONCE("Render.AssetsRequested");
+}
+
 bool UCrowdRenderSubsystem::EnsureHost(const UCrowdRenderSettings& Settings)
 {
 	if (IsValid(Host) && Instances != nullptr)
@@ -107,29 +162,17 @@ bool UCrowdRenderSubsystem::EnsureHost(const UCrowdRenderSettings& Settings)
 	Instances = nullptr;
 	NumInstances = 0;
 
-	// ---- assets: requested once, loaded in the background; the crowd simply appears a few frames later ----
-	if (!AssetHandle.IsValid())
+	// ---- assets: loaded in the background; the crowd simply appears a few frames later ----
+	RequestAssets(Settings);
+	if (bHostFailed || !AssetHandle.IsValid())
 	{
-		TArray<FSoftObjectPath> Paths;
-		Paths.Add(Settings.AgentMesh.ToSoftObjectPath());
-		if (!Settings.AgentMaterial.IsNull())
-		{
-			Paths.Add(Settings.AgentMaterial.ToSoftObjectPath());
-		}
-
-		AssetHandle = StreamableManager.RequestAsyncLoad(MoveTemp(Paths));
-		if (!AssetHandle.IsValid())
-		{
-			UE_LOG(LogMassBubbleRender, Error, TEXT("AgentMesh '%s' could not be requested - the crowd will not be drawn."),
-				*Settings.AgentMesh.ToString());
-			bHostFailed = true;
-			return false;
-		}
+		return false;
 	}
 	if (!AssetHandle->HasLoadCompleted())
 	{
 		return false; // still loading, try again next frame
 	}
+	OPT_BOOT_ONCE("Render.AssetsReady");
 
 	UStaticMesh* Mesh = Settings.AgentMesh.Get();
 	if (Mesh == nullptr)
@@ -218,6 +261,7 @@ void UCrowdRenderSubsystem::Tick(float DeltaTime)
 		ClearAll();
 		return;
 	}
+	OPT_BOOT_ONCE("Render.BubbleFound");
 	if (!EnsureHost(*Settings))
 	{
 		return;
@@ -309,6 +353,7 @@ void UCrowdRenderSubsystem::Tick(float DeltaTime)
 
 	// ---- 3) one call, one render-state update for the whole crowd ----
 	Instances->BatchUpdateInstancesTransforms(0, Transforms, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/true, /*bTeleport=*/true);
+	OPT_BOOT_ONCE("Render.FirstDraw");
 
 #if !UE_BUILD_SHIPPING
 	if (GRenderStats != 0 && GEngine != nullptr)

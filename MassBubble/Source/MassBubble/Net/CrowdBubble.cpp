@@ -1,5 +1,7 @@
 #include "Net/CrowdBubble.h"
 
+#include "Core/MassBubbleBoot.h"
+#include "Core/MassBubbleMemory.h"
 #include "Core/MassBubbleStats.h"
 #include "Crowd/CrowdSettings.h"
 #include "Crowd/CrowdSubsystem.h"
@@ -108,6 +110,11 @@ void ACrowdBubble::BeginPlay()
 
 	// Only the authority simulates the interest set; remote copies just hold the replicated data.
 	SetActorTickEnabled(HasAuthority());
+
+	if (GetNetMode() != NM_DedicatedServer)
+	{
+		OnBubbleBeginPlay().Broadcast(this);
+	}
 }
 
 void ACrowdBubble::Tick(float DeltaSeconds)
@@ -147,6 +154,8 @@ void ACrowdBubble::Tick(float DeltaSeconds)
 void ACrowdBubble::ServerRebuild(UCrowdSubsystem& Crowd)
 {
 	OPT_SCOPE(STAT_OptCrowd_Bubble, Bubble, "Opt.Crowd.Bubble");
+	OPT_LLM_SCOPE(OptCrowd_Bubble);
+	OPT_BOOT_ONCE("Net.FirstBubbleRebuild");
 
 	const FCrowdTuning& Tuning = GetCrowdTuning();
 
@@ -307,6 +316,12 @@ void ACrowdBubble::ServerRebuild(UCrowdSubsystem& Crowd)
 	INC_DWORD_STAT_BY(STAT_OptCrowd_BubbleDirty, NumDirty);
 	CSV_CUSTOM_STAT(OptCrowd, BubbleItems, Items.Num(), ECsvCustomStatOp::Accumulate);
 	CSV_CUSTOM_STAT(OptCrowd, BubbleDirty, NumDirty, ECsvCustomStatOp::Accumulate);
+}
+
+FOnCrowdBubbleBeginPlay& ACrowdBubble::OnBubbleBeginPlay()
+{
+	static FOnCrowdBubbleBeginPlay Delegate;
+	return Delegate;
 }
 
 ACrowdBubble* ACrowdBubble::FindLocalBubble(const UWorld* World)

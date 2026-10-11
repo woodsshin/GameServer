@@ -8,7 +8,11 @@
 #include "CrowdBubble.generated.h"
 
 class UCrowdSubsystem;
+class ACrowdBubble;
 struct FCrowdAgentArray;
+
+/** Broadcast on every machine with a screen when a bubble begins play. */
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnCrowdBubbleBeginPlay, ACrowdBubble*);
 
 /**
  * One replicated agent, fixed-size integers only:
@@ -151,6 +155,9 @@ public:
 
 	/** The bubble owned by a locally controlled PlayerController, if it exists (client / standalone / listen host). */
 	static ACrowdBubble* FindLocalBubble(const UWorld* World);
+
+	/** Lets the renderer look for its bubble the moment one starts playing instead of polling for it. */
+	static FOnCrowdBubbleBeginPlay& OnBubbleBeginPlay();
 
 private:
 	void ServerRebuild(UCrowdSubsystem& Crowd);

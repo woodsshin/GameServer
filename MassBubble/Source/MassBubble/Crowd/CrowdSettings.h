@@ -40,6 +40,14 @@ public:
 	float RegionDeactivateDelaySec = 10.f;
 
 	/**
+	 * How long a region that nobody wants keeps its persisted population (seconds, 0 = for ever). After that the
+	 * population is dropped and generated again the next time the region is wanted. Bounds the memory of a server
+	 * whose players explore a large map.
+	 */
+	UPROPERTY(Config, EditAnywhere, Category = "Regions", meta = (ClampMin = "0"))
+	float PersistTTLSec = 0.f;
+
+	/**
 	 * Hard cap of agents created per frame.
 	 * The wall clock budget (category "Streaming") normally stops earlier.
 	 */
@@ -256,6 +264,8 @@ namespace CrowdCVars
 	extern MASSBUBBLE_API float BotRampIntervalSec;  // opt.crowd.BotRampSec        >= 0 overrides the setting, 0 = all bots at once
 	extern MASSBUBBLE_API int32 BotActivateCells;    // opt.crowd.BotActivateCells  1 = bots stream cells as "Activated" (default: "Loaded")
 	extern MASSBUBBLE_API int32 PCG;                 // opt.crowd.PCG               0 = never ask PCG, populate new regions randomly
+	extern MASSBUBBLE_API int32 LODPrepass;          // opt.crowd.LODPrepass        0 = every agent measures the distance to every viewer
+	extern MASSBUBBLE_API int32 TrimRegions;         // opt.crowd.TrimRegions       0 = regions keep the buffers they do not use
 }
 
 /** Immutable-per-frame tuning snapshot. Safe to read from any thread; rebuilt only via ReloadCrowdTuning(). */

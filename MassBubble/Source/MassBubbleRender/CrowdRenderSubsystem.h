@@ -25,8 +25,8 @@ class UInstancedStaticMeshComponent;
  * It exists only where there is a screen: the module is ClientOnly and ShouldCreateSubsystem also rejects
  * dedicated servers and commandlets.
  *
- * The agent mesh / material are loaded asynchronously the first time a bubble shows up
- * (a synchronous load would stall the game thread).
+ * The agent mesh / material are loaded asynchronously, when the world starts (UCrowdRenderSettings::bPrewarmAssets)
+ * or when the first bubble starts playing; a synchronous load would stall the game thread.
  */
 UCLASS()
 class MASSBUBBLERENDER_API UCrowdRenderSubsystem : public UTickableWorldSubsystem
@@ -36,11 +36,14 @@ class MASSBUBBLERENDER_API UCrowdRenderSubsystem : public UTickableWorldSubsyste
 public:
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual TStatId GetStatId() const override;
 
 private:
+	void RequestAssets(const UCrowdRenderSettings& Settings);
+	void HandleBubbleBeginPlay(ACrowdBubble* InBubble);
 	bool EnsureHost(const UCrowdRenderSettings& Settings);
 	void ResizeInstances(int32 NewCount);
 	void ClearAll();
@@ -52,6 +55,7 @@ private:
 	TObjectPtr<UInstancedStaticMeshComponent> Instances;
 
 	TWeakObjectPtr<ACrowdBubble> Bubble;
+	FDelegateHandle BubbleBeginPlayHandle;
 
 	/** Keeps the agent mesh / material alive; the load itself runs in the background. */
 	FStreamableManager StreamableManager;

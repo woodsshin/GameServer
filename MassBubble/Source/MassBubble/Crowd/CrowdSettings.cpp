@@ -20,6 +20,8 @@ namespace CrowdCVars
 	float BotRampIntervalSec = -1.f;
 	int32 BotActivateCells = 1;
 	int32 PCG = 1;
+	int32 LODPrepass = 1;
+	int32 TrimRegions = 1;
 
 	static FAutoConsoleVariableRef CVarEnable(
 		TEXT("opt.crowd.Enable"), Enable,
@@ -68,6 +70,14 @@ namespace CrowdCVars
 	static FAutoConsoleVariableRef CVarPCG(
 		TEXT("opt.crowd.PCG"), PCG,
 		TEXT("1: a region that was never populated asks the PCG spawn graph where its agents start (needs a graph in the settings). 0: plain random placement. Regions that already have a population keep it."), ECVF_Default);
+
+	static FAutoConsoleVariableRef CVarLODPrepass(
+		TEXT("opt.crowd.LODPrepass"), LODPrepass,
+		TEXT("1: LOD tiers are measured against the viewers that can be nearest to a region (per-region bounds, same tiers). 0: every agent measures the distance to every viewer."), ECVF_Default);
+
+	static FAutoConsoleVariableRef CVarTrimRegions(
+		TEXT("opt.crowd.TrimRegions"), TrimRegions,
+		TEXT("1: a region frees what it does not use (saved agents while active, entity handles and replication grid while inactive) and reserves what it will fill. 0: it keeps the capacity."), ECVF_Default);
 }
 
 UCrowdSettings::UCrowdSettings()
@@ -101,6 +111,7 @@ namespace
 		Out.ActiveRegionRadius = FMath::Clamp(S.ActiveRegionRadius, 1, 8);
 		Out.AgentsPerRegion = FMath::Clamp(S.AgentsPerRegion, 1, 5000);
 		Out.RegionDeactivateDelaySec = FMath::Max(S.RegionDeactivateDelaySec, 0.f);
+		Out.PersistTTLSec = FMath::Max(S.PersistTTLSec, 0.f);
 		Out.MaxSpawnPerFrame = FMath::Max(S.MaxSpawnPerFrame, 1);
 		Out.MaxDespawnPerFrame = FMath::Max(S.MaxDespawnPerFrame, 1);
 		Out.WorldSeed = S.WorldSeed;

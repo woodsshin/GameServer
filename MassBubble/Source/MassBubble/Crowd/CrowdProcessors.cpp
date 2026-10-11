@@ -1,5 +1,6 @@
 #include "Crowd/CrowdProcessors.h"
 
+#include "Core/MassBubbleMemory.h"
 #include "Core/MassBubbleStats.h"
 #include "Crowd/CrowdFragments.h"
 #include "Crowd/CrowdMath.h"
@@ -34,6 +35,29 @@ void UCrowdLODProcessor::ConfigureQueries(const TSharedRef<FMassEntityManager>& 
 	ProcessorRequirements.AddSubsystemRequirement<UCrowdSubsystem>(EMassFragmentAccess::ReadWrite);
 }
 
+void UCrowdLODProcessor::BuildLodTable(const UCrowdSubsystem& Crowd, const FCrowdTuning& Tuning)
+{
+	LodViewers.Reset();
+	for (const FCrowdViewer& Viewer : Crowd.GetViewers())
+	{
+		LodViewers.Add(Viewer.Location);
+	}
+
+	const int32 NumSlots = Crowd.GetNumRegionSlots();
+	LodTable.Begin(NumSlots, LodViewers);
+	for (int32 Slot = 0; Slot < NumSlots; ++Slot)
+	{
+		FIntPoint Coord;
+		if (Crowd.GetLiveRegionCoord(Slot, Coord))
+		{
+			LodTable.AddRegion(Slot, CrowdMath::RegionMin(Coord, Tuning.RegionSizeCm), Tuning.RegionSizeCm, Tuning);
+		}
+	}
+
+	CSV_CUSTOM_STAT(OptCrowd, LodMixedRegions, LodTable.NumMixed, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, LodOffRegions, LodTable.NumAllOff, ECsvCustomStatOp::Set);
+}
+
 void UCrowdLODProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
 	OPT_SCOPE(STAT_OptCrowd_LOD, LOD, "Opt.Crowd.LOD");
@@ -53,6 +77,13 @@ void UCrowdLODProcessor::Execute(FMassEntityManager& EntityManager, FMassExecuti
 	const TArray<FCrowdViewer>& Viewers = Crowd->GetViewers();
 	const bool bUseLOD = CrowdCVars::LOD != 0;
 	const uint32 Frame = static_cast<uint32>(GFrameCounter);
+
+	// Per-region bounds: with several viewers (players and load-test bots) most agents are measured against one or two of them.
+	const bool bUseTable = bUseLOD && CrowdCVars::LODPrepass != 0 && Viewers.Num() >= CrowdLod::MinViewersForTable;
+	if (bUseTable)
+	{
+		BuildLodTable(*Crowd, Tuning);
+	}
 
 	int32 Counts[CrowdLODCount] = { 0, 0, 0, 0 };
 
@@ -74,17 +105,24 @@ void UCrowdLODProcessor::Execute(FMassEntityManager& EntityManager, FMassExecuti
 			else if (((Frame + Ids[i].NetId) & 3u) == 0u)
 			{
 				// Time-sliced LOD: each agent is re-classified every 4th frame.
-				float Distance = 1.0e12f; // no viewer => far away => Off
-				if (Viewers.Num() > 0)
+				if (bUseTable)
 				{
-					double BestSq = TNumericLimits<double>::Max();
-					for (const FCrowdViewer& Viewer : Viewers)
-					{
-						BestSq = FMath::Min(BestSq, FVector2D::DistSquared(Locations[i].Location, Viewer.Location));
-					}
-					Distance = static_cast<float>(FMath::Sqrt(BestSq));
+					LOD.Tier = LodTable.Classify(Ids[i].RegionSlot, Locations[i].Location, LOD.Tier, Tuning);
 				}
-				LOD.Tier = CrowdMath::ComputeTier(Distance, LOD.Tier, Tuning);
+				else
+				{
+					float Distance = 1.0e12f; // no viewer => far away => Off
+					if (Viewers.Num() > 0)
+					{
+						double BestSq = TNumericLimits<double>::Max();
+						for (const FCrowdViewer& Viewer : Viewers)
+						{
+							BestSq = FMath::Min(BestSq, FVector2D::DistSquared(Locations[i].Location, Viewer.Location));
+						}
+						Distance = static_cast<float>(FMath::Sqrt(BestSq));
+					}
+					LOD.Tier = CrowdMath::ComputeTier(Distance, LOD.Tier, Tuning);
+				}
 			}
 
 			++Counts[static_cast<int32>(LOD.Tier)];
@@ -233,6 +271,7 @@ void UCrowdSnapshotProcessor::Execute(FMassEntityManager& EntityManager, FMassEx
 	}
 
 	OPT_SCOPE(STAT_OptCrowd_Snapshot, Snapshot, "Opt.Crowd.Snapshot");
+	OPT_LLM_SCOPE(OptCrowd_Grids);
 
 	Crowd->BeginSnapshot();
 

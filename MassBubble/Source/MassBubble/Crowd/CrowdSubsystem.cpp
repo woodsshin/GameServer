@@ -1,5 +1,7 @@
 #include "Crowd/CrowdSubsystem.h"
 
+#include "Core/MassBubbleBoot.h"
+#include "Core/MassBubbleMemory.h"
 #include "Core/MassBubbleStats.h"
 #include "Core/MassBubbleStreamingMonitor.h"
 #include "Crowd/CrowdFragments.h"
@@ -17,6 +19,24 @@
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformTime.h"
 #include "MassEntitySubsystem.h"
+
+namespace
+{
+	/** The live entities are the truth once a region has spawned: its restore source is not needed any more. */
+	void MarkRegionActive(FCrowdRegion& Region)
+	{
+		if (CrowdCVars::TrimRegions != 0)
+		{
+			Region.Saved.Empty();
+		}
+		else
+		{
+			Region.Saved.Reset();
+		}
+		Region.State = ECrowdRegionState::Active;
+		OPT_BOOT_ONCE("Crowd.FirstRegionActive");
+	}
+}
 
 bool UCrowdSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 {
@@ -52,6 +72,9 @@ void UCrowdSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	CachedRegionSizeCm = T.RegionSizeCm;
 	CachedGridCellSizeCm = T.GridCellSizeCm;
 
+	// Created here, the archetype costs nothing in the first spawn frame.
+	GetAgentArchetype();
+
 	// Spawn plans: a PCG graph tells a new region where its agents start. The planner only exists while a graph is
 	// configured; without one (or with opt.crowd.PCG 0) regions are populated randomly, exactly as before.
 	if (T.bUsePCG)
@@ -63,6 +86,7 @@ void UCrowdSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		}
 	}
 
+	MassBubbleBoot::Mark(TEXT("Crowd.SubsystemReady"));
 	UE_LOG(LogMassBubble, Log, TEXT("CrowdSubsystem up (NetMode=%d). Region=%.0fcm, ActiveRadius=%d, AgentsPerRegion=%d, ReplicationHz=%.1f"),
 		static_cast<int32>(GetWorld()->GetNetMode()), T.RegionSizeCm, T.ActiveRegionRadius, T.AgentsPerRegion, T.ReplicationHz);
 }
@@ -147,6 +171,13 @@ void UCrowdSubsystem::TickDirector(float DeltaSeconds)
 	SET_DWORD_STAT(STAT_OptCrowd_Regions, ActiveRegions);
 	CSV_CUSTOM_STAT(OptCrowd, Agents, AliveAgents, ECsvCustomStatOp::Set);
 	CSV_CUSTOM_STAT(OptCrowd, ActiveRegions, ActiveRegions, ECsvCustomStatOp::Set);
+
+	MemorySampleAccumulator += DeltaSeconds;
+	if (MemorySampleAccumulator >= 1.f)
+	{
+		MemorySampleAccumulator = 0.f;
+		PublishMemoryStats();
+	}
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -327,7 +358,7 @@ void UCrowdSubsystem::EvaluateRegions(double Now)
 	}
 
 	// Newly wanted regions: closest to any viewer first, so the player's own surroundings fill in first.
-	TArray<TPair<double, int32>> ToActivate;
+	TArray<TPair<double, int32>, TInlineAllocator<32>> ToActivate;
 	for (const FIntPoint& Coord : WantedScratch)
 	{
 		const int32 Slot = FindOrAddRegion(Coord);
@@ -376,6 +407,8 @@ void UCrowdSubsystem::EvaluateRegions(double Now)
 			}
 		}
 	}
+
+	EvictStalePersistence(Now);
 }
 
 void UCrowdSubsystem::BeginSpawn(FCrowdRegion& Region)
@@ -405,6 +438,11 @@ void UCrowdSubsystem::StartSpawning(FCrowdRegion& Region)
 	Region.SpawnCursor = 0;
 	// Restore the persisted / planned population if there is one, otherwise generate it deterministically from the seed.
 	Region.SpawnTarget = (Region.bPlanned || Region.Saved.Num() > 0) ? Region.Saved.Num() : T.AgentsPerRegion;
+	Region.InactiveSince = -1.0;
+	if (CrowdCVars::TrimRegions != 0)
+	{
+		Region.Entities.Reserve(Region.SpawnTarget);
+	}
 	SpawnQueue.Add(Region.Slot);
 }
 
@@ -473,12 +511,6 @@ void UCrowdSubsystem::PumpPlans()
 	}
 
 	CSV_CUSTOM_STAT(OptCrowd, PlansPending, Planner->GetNumPending(), ECsvCustomStatOp::Set);
-
-	// Cumulative values: Run-AB.ps1 reads the LAST row of the capture (plans finished, failed, latency from request to answer).
-	CSV_CUSTOM_STAT(OptCrowd, PlansOk, Planner->GetNumOk(), ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(OptCrowd, PlansFailed, Planner->GetNumFailed(), ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(OptCrowd, PlanLatencyAvgMs, static_cast<float>(1000.0 * Planner->GetAvgLatencySec()), ECsvCustomStatOp::Set);
-	CSV_CUSTOM_STAT(OptCrowd, PlanLatencyMaxMs, static_cast<float>(1000.0 * Planner->GetMaxLatencySec()), ECsvCustomStatOp::Set);
 }
 
 void UCrowdSubsystem::ApplyPlan(FCrowdRegion& Region, FCrowdPlanResult& Result)
@@ -502,9 +534,18 @@ void UCrowdSubsystem::ApplyPlan(FCrowdRegion& Region, FCrowdPlanResult& Result)
 	const CrowdWander::FBox2 Home{ Min, Min + FVector2D(T.RegionSizeCm, T.RegionSizeCm) };
 
 	// The plan becomes the region's persisted population: from here on it is spawned by exactly the code that restores
-	// a despawned region (MakeAgent returns Saved[Index]).
+	// a despawned region (MakeAgent unpacks Saved[Index]).
 	const CrowdPlan::FBuildStats Stats = CrowdPlan::BuildAgents(
-		Result.Points, Home, Region.Seed, T.AgentsPerRegion, T.bPCGUsePointYaw, T, NextNetId, Region.Saved);
+		Result.Points, Home, Region.Seed, T.AgentsPerRegion, T.bPCGUsePointYaw, T, NextNetId, PlanScratch);
+
+	Region.Saved.Reset();
+	Region.Saved.Reserve(PlanScratch.Num());
+	for (const FCrowdSavedAgent& Agent : PlanScratch)
+	{
+		Region.Saved.Add(CrowdPersist::Pack(Agent, Min));
+	}
+	PlanScratch.Reset();
+	OPT_BOOT_ONCE("PCG.FirstPlanApplied");
 
 	// Saved is the truth now, even if the graph left this region empty.
 	Region.bPlanned = true;
@@ -534,11 +575,47 @@ int32 UCrowdSubsystem::ForgetInactivePlans()
 		{
 			continue;
 		}
-		Region.bPlanned = false;
-		Region.Saved.Reset();
+		ForgetRegion(Region);
 		++Count;
 	}
 	return Count;
+}
+
+void UCrowdSubsystem::ForgetRegion(FCrowdRegion& Region)
+{
+	Region.bPlanned = false;
+	Region.Saved.Empty();
+	Region.InactiveSince = -1.0;
+}
+
+int32 UCrowdSubsystem::EvictStalePersistence(double Now)
+{
+	const float TtlSec = GetCrowdTuning().PersistTTLSec;
+	if (TtlSec <= 0.f)
+	{
+		return 0;
+	}
+
+	int32 Evicted = 0;
+	for (FCrowdRegion& Region : Regions)
+	{
+		if (Region.State != ECrowdRegionState::Inactive || Region.InactiveSince < 0.0)
+		{
+			continue;
+		}
+		if (!Region.bPlanned && Region.Saved.Num() == 0)
+		{
+			continue;
+		}
+		if (Now - Region.InactiveSince >= static_cast<double>(TtlSec))
+		{
+			ForgetRegion(Region);
+			++Evicted;
+		}
+	}
+
+	NumEvictedRegions += Evicted;
+	return Evicted;
 }
 
 void UCrowdSubsystem::BeginDespawn(FCrowdRegion& Region)
@@ -636,19 +713,19 @@ FMassArchetypeHandle UCrowdSubsystem::GetAgentArchetype()
 
 FCrowdSavedAgent UCrowdSubsystem::MakeAgent(const FCrowdRegion& Region, int32 Index)
 {
+	const FCrowdTuning& T = GetCrowdTuning();
+	const FVector2D Min = CrowdMath::RegionMin(Region.Coord, T.RegionSizeCm);
+
 	if (Region.Saved.IsValidIndex(Index))
 	{
-		return Region.Saved[Index]; // restore exactly what was persisted
+		return CrowdPersist::Unpack(Region.Saved[Index], Min); // restore what was persisted
 	}
-
-	const FCrowdTuning& T = GetCrowdTuning();
 
 	FCrowdSavedAgent Agent;
 	Agent.NetId = NextNetId++;
 
 	// Position, heading, cruise speed and the first pause are decided by CrowdWander::InitNewAgent (unit tested): new
 	// agents start on open ground, never inside the band along the region border.
-	const FVector2D Min = CrowdMath::RegionMin(Region.Coord, T.RegionSizeCm);
 	const CrowdWander::FBox2 Home{ Min, Min + FVector2D(T.RegionSizeCm, T.RegionSizeCm) };
 	CrowdWander::InitNewAgent(Agent, Region.Seed + static_cast<uint32>(Index) * 2654435761u, Home, T);
 	return Agent;
@@ -657,19 +734,21 @@ FCrowdSavedAgent UCrowdSubsystem::MakeAgent(const FCrowdRegion& Region, int32 In
 int32 UCrowdSubsystem::SpawnSlice(FCrowdRegion& Region, int32 Budget)
 {
 	OPT_SCOPE(STAT_OptCrowd_Spawn, SpawnSlice, "Opt.Crowd.SpawnSlice");
+	OPT_LLM_SCOPE(OptCrowd_Entities);
+	OPT_BOOT_ONCE("Crowd.FirstSpawnSlice");
 
 	const int32 Remaining = Region.SpawnTarget - Region.SpawnCursor;
 	const int32 Count = FMath::Min(Budget, Remaining);
 	if (Count <= 0)
 	{
-		Region.Saved.Reset();
-		Region.State = ECrowdRegionState::Active;
+		MarkRegionActive(Region);
 		return 0;
 	}
 
 	FMassEntityManager& EM = *EntityManager;
 
-	TArray<FMassEntityHandle> NewEntities;
+	TArray<FMassEntityHandle>& NewEntities = SpawnScratch;
+	NewEntities.Reset();
 	NewEntities.Reserve(Count);
 	{
 		// Observers (none today) are notified when this context goes out of scope, i.e. after the data is filled in.
@@ -704,8 +783,7 @@ int32 UCrowdSubsystem::SpawnSlice(FCrowdRegion& Region, int32 Budget)
 
 	if (Region.SpawnCursor >= Region.SpawnTarget)
 	{
-		Region.Saved.Reset(); // live entities are the truth again
-		Region.State = ECrowdRegionState::Active;
+		MarkRegionActive(Region);
 	}
 	return NewEntities.Num();
 }
@@ -713,6 +791,7 @@ int32 UCrowdSubsystem::SpawnSlice(FCrowdRegion& Region, int32 Budget)
 int32 UCrowdSubsystem::DespawnSlice(FCrowdRegion& Region, int32 Budget)
 {
 	OPT_SCOPE(STAT_OptCrowd_Despawn, DespawnSlice, "Opt.Crowd.DespawnSlice");
+	OPT_LLM_SCOPE(OptCrowd_Persist);
 
 	FMassEntityManager& EM = *EntityManager;
 
@@ -722,6 +801,7 @@ int32 UCrowdSubsystem::DespawnSlice(FCrowdRegion& Region, int32 Budget)
 	if (Count > 0)
 	{
 		// 1) persist the compact state of this slice
+		const FVector2D RegionMin = CrowdMath::RegionMin(Region.Coord, GetCrowdTuning().RegionSizeCm);
 		for (int32 i = Region.DespawnCursor; i < Region.DespawnCursor + Count; ++i)
 		{
 			const FMassEntityHandle Entity = Region.Entities[i];
@@ -729,14 +809,15 @@ int32 UCrowdSubsystem::DespawnSlice(FCrowdRegion& Region, int32 Budget)
 			const FCrowdLocationFragment& Loc = EM.GetFragmentDataChecked<FCrowdLocationFragment>(Entity);
 			const FCrowdMotionFragment& Motion = EM.GetFragmentDataChecked<FCrowdMotionFragment>(Entity);
 
-			FCrowdSavedAgent& Saved = Region.Saved.AddDefaulted_GetRef();
-			Saved.NetId = Id.NetId;
-			Saved.Location = Loc.Location;
-			Saved.Velocity = Motion.Velocity;
-			Saved.RetargetTimer = Motion.RetargetTimer;
-			Saved.Rng = Motion.Rng;
-			Saved.Heading = Motion.Heading;
-			Saved.CruiseSpeed = Motion.CruiseSpeed;
+			FCrowdSavedAgent Agent;
+			Agent.NetId = Id.NetId;
+			Agent.Location = Loc.Location;
+			Agent.Velocity = Motion.Velocity;
+			Agent.RetargetTimer = Motion.RetargetTimer;
+			Agent.Rng = Motion.Rng;
+			Agent.Heading = Motion.Heading;
+			Agent.CruiseSpeed = Motion.CruiseSpeed;
+			Region.Saved.Add(CrowdPersist::Pack(Agent, RegionMin));
 		}
 
 		// 2) destroy them in one batch
@@ -747,9 +828,18 @@ int32 UCrowdSubsystem::DespawnSlice(FCrowdRegion& Region, int32 Budget)
 
 	if (Region.DespawnCursor >= Region.Entities.Num())
 	{
-		Region.Entities.Reset();
+		if (CrowdCVars::TrimRegions != 0)
+		{
+			Region.Entities.Empty();
+			Region.Grid.Release();
+		}
+		else
+		{
+			Region.Entities.Reset();
+		}
 		Region.DespawnCursor = 0;
 		Region.State = ECrowdRegionState::Inactive;
+		Region.InactiveSince = GetNow();
 	}
 	return Count;
 }
@@ -818,7 +908,7 @@ void UCrowdSubsystem::BeginSnapshot()
 	{
 		if (RegionSnapshotMask[Slot] != 0)
 		{
-			Regions[Slot].Grid.BeginBuild();
+			Regions[Slot].Grid.BeginBuild(CrowdCVars::TrimRegions != 0 ? Regions[Slot].SpawnTarget : 0);
 		}
 	}
 }
@@ -878,6 +968,71 @@ int32 UCrowdSubsystem::GetNumRegionsInState(ECrowdRegionState State) const
 	return Count;
 }
 
+bool UCrowdSubsystem::GetLiveRegionCoord(int32 Slot, FIntPoint& OutCoord) const
+{
+	if (!Regions.IsValidIndex(Slot))
+	{
+		return false;
+	}
+
+	const FCrowdRegion& Region = Regions[Slot];
+	if (Region.State != ECrowdRegionState::Spawning && Region.State != ECrowdRegionState::Active && Region.State != ECrowdRegionState::Despawning)
+	{
+		return false;
+	}
+
+	OutCoord = Region.Coord;
+	return true;
+}
+
+FCrowdMemoryStats UCrowdSubsystem::GetMemoryStats() const
+{
+	FCrowdMemoryStats Stats;
+	Stats.NumRegions = Regions.Num();
+	Stats.NumEvictedRegions = NumEvictedRegions;
+	Stats.RegionTableBytes = Regions.GetAllocatedSize() + RegionSlotByCoord.GetAllocatedSize();
+
+	for (const FCrowdRegion& Region : Regions)
+	{
+		const SIZE_T SavedUsed = static_cast<SIZE_T>(Region.Saved.Num()) * sizeof(FCrowdPackedAgent);
+		const SIZE_T SavedAllocated = Region.Saved.GetAllocatedSize();
+		const SIZE_T HandlesUsed = static_cast<SIZE_T>(Region.Entities.Num()) * sizeof(FMassEntityHandle);
+		const SIZE_T HandlesAllocated = Region.Entities.GetAllocatedSize();
+		const SIZE_T GridAllocated = Region.Grid.GetAllocatedSize();
+
+		Stats.NumPersistedAgents += Region.Saved.Num();
+		Stats.SavedUsedBytes += SavedUsed;
+		Stats.SavedAllocatedBytes += SavedAllocated;
+		Stats.HandlesUsedBytes += HandlesUsed;
+		Stats.HandlesAllocatedBytes += HandlesAllocated;
+		Stats.GridAllocatedBytes += GridAllocated;
+
+		// A grid is only needed while a real player can see its region (the snapshot scope).
+		Stats.DeadBytes += (SavedAllocated - SavedUsed) + (HandlesAllocated - HandlesUsed) + (IsRegionSnapshotted(Region.Slot) ? 0 : GridAllocated);
+	}
+	return Stats;
+}
+
+FString UCrowdSubsystem::GetMemorySummary() const
+{
+	const FCrowdMemoryStats Stats = GetMemoryStats();
+	const auto KB = [](SIZE_T Bytes) { return static_cast<double>(Bytes) / 1024.0; };
+
+	return FString::Printf(TEXT("memory: regions=%d (table %.0f KB, evicted %d) | persisted agents=%d, saved %.0f KB used / %.0f KB allocated | entity handles %.0f / %.0f KB | replication grids %.0f KB | dead capacity %.0f KB"),
+		Stats.NumRegions, KB(Stats.RegionTableBytes), Stats.NumEvictedRegions, Stats.NumPersistedAgents,
+		KB(Stats.SavedUsedBytes), KB(Stats.SavedAllocatedBytes), KB(Stats.HandlesUsedBytes), KB(Stats.HandlesAllocatedBytes),
+		KB(Stats.GridAllocatedBytes), KB(Stats.DeadBytes));
+}
+
+void UCrowdSubsystem::PublishMemoryStats()
+{
+	const FCrowdMemoryStats Stats = GetMemoryStats();
+	CSV_CUSTOM_STAT(OptCrowd, SavedKB, static_cast<float>(Stats.SavedAllocatedBytes) / 1024.f, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, DeadKB, static_cast<float>(Stats.DeadBytes) / 1024.f, ECsvCustomStatOp::Set);
+	CSV_CUSTOM_STAT(OptCrowd, ProcessMB, static_cast<float>(MassBubbleMem::GetProcessUsedBytes()) / (1024.f * 1024.f), ECsvCustomStatOp::Set);
+	MassBubbleMem::PublishCsvMetadata();
+}
+
 FString UCrowdSubsystem::GetDebugSummary() const
 {
 	return FString::Printf(TEXT("crowd: regions planning=%d spawning=%d despawning=%d | queues spawn=%d despawn=%d | pcg plans pending=%d | snapshot regions=%d | bot ops pending=%d"),
@@ -898,6 +1053,7 @@ void UCrowdSubsystem::DumpStats() const
 	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] LOD tiers: High=%d Medium=%d Low=%d Off=%d | spawnQueue=%d despawnQueue=%d snapshotSerial=%u"),
 		TierCounts[0], TierCounts[1], TierCounts[2], TierCounts[3], SpawnQueue.Num(), DespawnQueue.Num(), SnapshotSerial);
 	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] %s"), *GetDebugSummary());
+	UE_LOG(LogMassBubble, Log, TEXT("[Crowd] %s"), *GetMemorySummary());
 	if (Planner != nullptr)
 	{
 		UE_LOG(LogMassBubble, Log, TEXT("[Crowd] %s"), *Planner->GetDebugSummary());
