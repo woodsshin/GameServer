@@ -123,7 +123,7 @@ void MassBubbleBoot::LogIoDiagnostics()
 		TEXT("s.ForceGCAfterLevelStreamedOut"),
 		TEXT("gc.TimeBetweenPurgingPendingKillObjects"),
 		TEXT("wp.Runtime.BlockOnSlowStreaming"),
-		TEXT("wp.Runtime.MaxLoadingLevelStreamingCells"),
+		TEXT("wp.Runtime.MaxLoadingStreamingCells "),
 		TEXT("net.IsPushModelEnabled"),
 	};
 	for (const TCHAR* Name : CVarNames)

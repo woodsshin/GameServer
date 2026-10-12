@@ -84,7 +84,7 @@ namespace
 		{ TEXT("wp.Runtime.BlockOnSlowStreaming"), TEXT("0"), EProfileScope::ServerOnly,
 			TEXT("never freeze the server tick (= every player) while a cell is still loading") },
 
-		{ TEXT("wp.Runtime.MaxLoadingLevelStreamingCells"), TEXT("2"), EProfileScope::ServerOnly,
+		{ TEXT("wp.Runtime.MaxLoadingStreamingCells "), TEXT("2"), EProfileScope::ServerOnly,
 			TEXT("cells loading at the same time: smaller bursts of PostLoad / registration work") },
 	};
 
