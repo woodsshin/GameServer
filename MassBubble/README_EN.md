@@ -33,6 +33,7 @@ Server-authoritative **PCG** based **Mass Entity** simulation · per-player **AO
   - [12. World Partition Streaming Anchor](#12-world-partition-streaming-anchor)
   - [13. World Partition Load / Unload Optimization](#13-world-partition-load--unload-optimization)
   - [14. Server Diet — Removing Unused Plugins](#14-server-diet--removing-unused-plugins)
+  - [15. Packaging — Pak Loading Speed and Asset Read Optimization](#15-packaging--pak-loading-speed-and-asset-read-optimization)
 - [Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results)
 - [Verification (Automation Tests)](#verification-automation-tests)
 - [Design Figures](#design-figures)
@@ -1073,6 +1074,49 @@ Median of 5 runs per label of a `-OptBots=8` server (one warm-up run discarded):
 - **Where the saving comes from**: the executable and the settled memory drop by the same 16 MB. It is the linked code and its class registration at startup, not runtime heap.
 
 The procedure, report fields, notes on reading the results and the full result tables are in [SERVER_DIET_EN.md](./Tools/SERVER_DIET_EN.md).
+
+### 15. Packaging — Pak Loading Speed and Asset Read Optimization
+
+#### ① Pak File Ordering (Order / Response File)
+
+When data is read from disk (HDD/SSD), a Pak whose file headers and assets are scattered in no particular order makes the read head or pointer move needlessly, which creates a loading bottleneck. Sorting the assets inside the Pak in the order the game actually needs them at runtime is the key to faster loading.
+
+- **Measure and collect (`-fileopenlog`)**
+  - Package a development build (Development or Shipping) and launch it with `-fileopenlog` added to the launch arguments.
+  - When the game exits, a log recording the file access order is left in the project's `Saved/Logs/` folder.
+- **apply GameOpenOrder.log **
+```
+; Config/DefaultGame.ini
+[/Script/UnrealEd.ProjectPackagingSettings]
+PakOrderFileSpecs=(Pattern="GameOpenOrder.log")
+```
+- **Effect**: fewer head sector seeks, so initial loading and map loading times drop dramatically.
+
+#### ② Asynchronous Loading Thread (ALT) and EDL
+
+Improve the loading approach at the engine level to minimize CPU and disk I/O wait time.
+
+- **Asynchronous Loading Thread (ALT)**
+  - Can be enabled in the `Project Settings > Engine > Streaming` tab (off by default).
+  - Serialization and post-load code are processed concurrently on two separate threads, cutting loading time by up to 2×.
+  - **Caution**: when enabled, code such as `UObject` constructors, `PostInitProperties` and `Serialize` functions must be thread-safe.
+- **Event-Driven Loader (EDL)**
+  - It is enabled by default in recent engine versions, but if it happens to be off, it must be turned on in the Streaming tab.
+  - It turns the asset loading pipeline into an event-driven one, which reduces unnecessary waiting.
+
+#### ③ Reviewing Compression Options
+
+Compressing the whole Pak reduces disk size, but it adds CPU decompression load and can actually slow loading on low-end devices or when the CPU is the bottleneck.
+
+- **Oodle or Zlib compression settings**
+  - Adjust the `Create compressed cooked packages` option in `Project Settings > Packaging > Advanced`.
+  - To balance disk size against CPU decoding cost, make active use of Oodle, Unreal's high-performance compression algorithm.
+  - Verify that multithreaded decompression is working properly.
+
+#### ④ Chunk Splitting
+
+- **Chunk-based packaging**
+  - Instead of one huge Pak file, put only the essential core assets in the initial Pak and split the rest into per-map / per-content Chunks (assigning Chunk IDs), then mount or stream them asynchronously.
 
 ---
 ## Instrumentation and Experiment Design ([Profiling Results](./Tools/Profiling_EN.md))

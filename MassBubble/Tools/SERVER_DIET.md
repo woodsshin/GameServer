@@ -45,7 +45,7 @@
 
 ---
 
-## 📊 측정 결과 (Measured result)
+## 측정 결과 (Measured result)
 
 스테이징된 데디케이트 서버 환경에서 `-OptBots=8` 옵션을 적용해 테스트를 진행했습니다. 첫 번째 웜업(Warm-up) 실행 결과는 제외하고 라벨당 5번의 유효한 실행 결과를 수집했습니다 (`Run-ServerDiet.ps1 -Runs 5 -ExtraArgs '-OptBots=8'`). 두 라벨 모두 동일한 실행 파일 경로와 인자를 사용했습니다. 
 

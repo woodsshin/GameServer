@@ -33,6 +33,7 @@
   - [12. World Partition Streaming Anchor](#12-world-partition-streaming-anchor)
   - [13. World Partition 로딩 / 언로딩 최적화](#13-world-partition-로딩--언로딩-최적화)
   - [14. 서버 다이어트 — 사용하지 않는 플러그인 제거](#14-서버-다이어트--사용하지-않는-플러그인-제거)
+  - [15. 패키징 — Pak 로딩 속도 및 에셋 읽기 최적화](#15-패키징--pak-로딩-속도-및-에셋-읽기-최적화)
 - [계측과 실험 설계](#계측과-실험-설계-프로파일-결과)
 - [검증 (Automation Tests)](#검증-automation-tests)
 - [설계 수치](#설계-수치)
@@ -1135,6 +1136,49 @@ gc.IncrementalReachabilityTimeLimit=0.002
 - **절감 요인** : 실행 파일과 안정화 메모리가 같은 16 MB 줄었습니다. 런타임 힙이 아니라 링크된 코드와 시작 시점의 클래스 등록 비용이 줄어든 것입니다.
 
 측정 절차, 보고서 항목, 해석 시 유의사항, 전체 결과 표는 [SERVER_DIET.md](./Tools/SERVER_DIET.md)를 참고합니다.
+
+### 15. 패키징 — Pak 로딩 속도 및 에셋 읽기 최적화
+
+#### ① Pak 파일 오더링 (Order / Response File)
+
+디스크(HDD/SSD)에서 데이터를 읽을 때, 파일 헤더와 에셋들이 뒤죽박죽 섞여 있으면 헤드나 포인터가 불필요하게 움직이며 로딩 병목이 생깁니다. 실제로 게임이 실행될 때 필요한 순서대로 Pak 내부의 에셋 배치를 정렬하는 것이 로딩 속도 개선의 핵심입니다.
+
+- **측정 및 수집 (`-fileopenlog`)**
+  - 개발 빌드(Development 혹은 Shipping)를 패키징하여 실행할 때, 실행 인자에 `-fileopenlog`를 붙여서 실행합니다.
+  - 게임을 종료하면 프로젝트의 `Saved/Logs/` 폴더에 파일 접근 순서가 기록된 로그가 남습니다.
+- **GameOpenOrder.log 적용**
+```
+; Config/DefaultGame.ini
+[/Script/UnrealEd.ProjectPackagingSettings]
+PakOrderFileSpecs=(Pattern="GameOpenOrder.log")
+```
+- **효과** : 헤드 섹터 이동 횟수가 줄어들어 초기 로딩 및 맵 로딩 시간이 극적으로 단축됩니다.
+
+#### ② 비동기 로딩 스레드 (ALT) 및 EDL 활용
+
+엔진 레벨에서 로딩 방식을 개선하여 CPU와 디스크 I/O 대기 시간을 최소화합니다.
+
+- **Asynchronous Loading Thread (ALT)**
+  - `Project Settings > Engine > Streaming` 탭에서 활성화할 수 있습니다 (기본값은 꺼져 있음).
+  - 직렬화(Serialization)와 후속 로딩(Post-Load) 코드를 두 개의 별도 스레드에서 동시에 처리하여 로딩 속도를 최대 2배까지 단축해 줍니다.
+  - **주의** : 활성화할 경우 `UObject` 생성자, `PostInitProperties`, `Serialize` 함수 등의 코드 상에서 스레드 안전성(Thread-safety)이 보장되어야 합니다.
+- **Event-Driven Loader (EDL)**
+  - 최신 엔진 버전에서는 기본 활성화되어 있지만, 혹시 꺼져 있다면 Streaming 탭에서 반드시 켜야 합니다.
+  - 에셋 로딩 파이프라인을 이벤트 기반으로 바꾸어 불필요한 대기 시간을 줄여줍니다.
+
+#### ③ 압축(Compression) 옵션 검토
+
+Pak 파일 전체를 압축하는 방식은 디스크 용량을 줄여주지만, CPU의 압축 해제(Decompression) 부하를 늘려 저사양 기기나 CPU 병목 상황에서 로딩을 오히려 느리게 만들 수 있습니다.
+
+- **Oodle 또는 Zlib 압축 설정**
+  - `Project Settings > Packaging > Advanced` 설정에서 `Create compressed cooked packages` 옵션을 조절합니다.
+  - 디스크 용량과 CPU 디코딩 비용 간의 균형을 위해 언리얼의 고성능 압축 알고리즘인 Oodle 포맷을 적극 활용하는 것이 좋습니다.
+  - 멀티스레드 압축 해제가 원활히 동작하는지 확인해야 합니다.
+
+#### ④ Chunk 분할
+
+- **Chunk 단위 분할 패키징**
+  - 거대한 하나의 Pak 파일 대신, 꼭 필요한 코어 에셋만 초기 Pak에 넣고 나머지는 맵별 / 콘텐츠별 Chunk로 쪼개어(Chunk ID 부여) 비동기로 마운트(Mount)하거나 스트리밍합니다.
 
 ---
 ## 계측과 실험 설계 ([프로파일 결과](./Tools/Profiling.md))
