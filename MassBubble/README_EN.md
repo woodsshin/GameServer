@@ -32,6 +32,7 @@ Server-authoritative **PCG** based **Mass Entity** simulation · per-player **AO
   - [11. Module Separation — `ClientOnly`](#11-module-separation--clientonly)
   - [12. World Partition Streaming Anchor](#12-world-partition-streaming-anchor)
   - [13. World Partition Load / Unload Optimization](#13-world-partition-load--unload-optimization)
+  - [14. Server Diet — Removing Unused Plugins](#14-server-diet--removing-unused-plugins)
 - [Instrumentation and Experiment Design](#instrumentation-and-experiment-design-profiling-results)
 - [Verification (Automation Tests)](#verification-automation-tests)
 - [Design Figures](#design-figures)
@@ -1052,6 +1053,26 @@ This item depends on the engine's level-streaming and GC behavior, so it is not 
 - **Quiet GC**: The 8 captured `[Stream] GC after cell unload: World Partition is quiet (waited …)` log lines are all on the "quiet" path, and the wait times are 5.0–14.0 s, within `GCMaxDeferSec` (20 s). The GC runs when there is no streaming load, not right after a cell unload.
 - **Streaming performance log**: Right after `SpawnBots`, the engine's `Streaming performance changed` log swings between Good ↔ Immediate / Slow / Critical but returns to Good at the end. This capture is from the heaviest setting, where bots raise cells to `Activated` (`opt.crowd.BotActivateCells 1`, the default).
 - **Scope**: It is Standalone PIE, so the dedicated-server-only entries (`wp.Runtime.*`, ①) are not applied in this environment. The applied state in a server process is checked with `opt.stream.Dump`.
+
+### 14. Server Diet — Removing Unused Plugins
+
+The dedicated server loads the engine's default plugins (editor tools, media, audio, mobile, and so on), and the crowd simulation uses almost none of them. `MassBubbleDiet` records the modules and plugins the server loads as a JSON report, and three PowerShell scripts (`Run-ServerDiet.ps1` · `Get-DietCandidates.ps1` · `Compare-ServerDiet.ps1`) run the server, pick the removal candidates and compare before and after. Remoivng candidates are switched off for the server only in the `.uproject` with `Enabled:false` + `TargetAllowList:["Server"]`; the client and the editor are not affected.
+
+Median of 5 runs per label of a `-OptBots=8` server (one warm-up run discarded):
+
+| Metric | Before | After | Change |
+|---|---|---|---|
+| Enabled plugins | 192 | 85 | -107 (-55.7%) |
+| Loaded modules | 279 | 206 | -73 (-26.2%) |
+| `Engine.InitComplete` | 1,191 ms | 1,053 ms | -137 ms (-11.5%) |
+| Process memory (settled) | 352.0 MB | 336.2 MB | -15.9 MB (-4.5%) |
+| Executable | 305.9 MB | 289.9 MB | -16.0 MB (-5.2%) |
+| UClasses / UObjects | 5,811 / 38,782 | 5,573 / 36,622 | -238 / -2,160 |
+
+- **No functional loss**: there are 0 new warnings or errors between the before and after logs, and the removed plugins had no live objects except `Mutable` (15) and `PhysicsControl` (2).
+- **Where the saving comes from**: the executable and the settled memory drop by the same 16 MB. It is the linked code and its class registration at startup, not runtime heap.
+
+The procedure, report fields, notes on reading the results and the full result tables are in [SERVER_DIET_EN.md](./Tools/SERVER_DIET_EN.md).
 
 ---
 ## Instrumentation and Experiment Design ([Profiling Results](./Tools/Profiling_EN.md))

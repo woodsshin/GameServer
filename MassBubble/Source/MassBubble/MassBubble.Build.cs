@@ -23,7 +23,10 @@ public class MassBubble : ModuleRules
 			// Mass. Public because our fragments / subsystem headers expose Mass types.
 			"MassCore",   // UE 5.8+ only. Remove this line when building against 5.7 or older.
 			"MassEntity",
-		});
+		
+			// IPluginManager: which plugin owns a loaded module (opt.boot.Modules 1, opt.diet.*, Core/MassBubbleDiet.cpp).
+			"Projects",
+        });
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{

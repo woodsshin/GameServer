@@ -32,6 +32,7 @@
   - [11. 모듈 분리 — `ClientOnly`](#11-모듈-분리--clientonly)
   - [12. World Partition Streaming Anchor](#12-world-partition-streaming-anchor)
   - [13. World Partition 로딩 / 언로딩 최적화](#13-world-partition-로딩--언로딩-최적화)
+  - [14. 서버 다이어트 — 사용하지 않는 플러그인 제거](#14-서버-다이어트--사용하지-않는-플러그인-제거)
 - [계측과 실험 설계](#계측과-실험-설계-프로파일-결과)
 - [검증 (Automation Tests)](#검증-automation-tests)
 - [설계 수치](#설계-수치)
@@ -1114,6 +1115,26 @@ gc.IncrementalReachabilityTimeLimit=0.002
 - **Quiet GC** : 캡처된 로그의 `[Stream] GC after cell unload: World Partition is quiet (waited …)` 8건이 모두 "quiet" 경로이고, 대기 시간은 5.0–14.0 s로 `GCMaxDeferSec`(20 s) 안입니다. 셀 언로드 직후가 아니라 스트리밍 부하가 없을 때 GC가 실행되고 있습니다.
 - **스트리밍 성능 로그** : `SpawnBots` 직후에는 엔진의 `Streaming performance changed` 로그가 Good ↔ Immediate / Slow / Critical 사이를 오가지만 마지막에는 Good으로 돌아옵니다. 봇이 셀을 `Activated`(`opt.crowd.BotActivateCells 1`, 기본값)로 올리는 가장 무거운 설정에서의 캡처입니다.
 - **범위** : Standalone PIE라서 데디케이티드 서버 전용 항목(`wp.Runtime.*`, ①)은 적용되지 않은 환경입니다. 서버 프로세스에서의 적용 상태는 `opt.stream.Dump`로 확인합니다.
+
+### 14. 서버 다이어트 — 사용하지 않는 플러그인 제거
+
+데디케이티드 서버는 엔진 기본 플러그인(에디터 도구, 미디어, 오디오, 모바일 등)을 그대로 로드하지만 크라우드 시뮬레이션은 이 중 대부분을 쓰지 않습니다. 서버가 로드하는 모듈과 플러그인을 `MassBubbleDiet`가 JSON 보고서로 기록하고, PowerShell 스크립트 3개(`Run-ServerDiet.ps1` · `Get-DietCandidates.ps1` · `Compare-ServerDiet.ps1`)가 실행 · 제거 후보 선별 · 전후 비교를 맡습니다. 제거 후보는 `.uproject`에서 `Enabled:false` + `TargetAllowList:["Server"]`로 서버에서만 끕니다. 클라이언트와 에디터는 영향을 받지 않습니다.
+
+`-OptBots=8` 서버를 라벨당 5회 실행한 중앙값 (웜업 1회 제외):
+
+| 항목 | 전 | 후 | 변화 |
+|---|---|---|---|
+| 활성 플러그인 | 192 | 85 | -107 (-55.7%) |
+| 로드된 모듈 | 279 | 206 | -73 (-26.2%) |
+| `Engine.InitComplete` | 1,191 ms | 1,053 ms | -137 ms (-11.5%) |
+| 프로세스 메모리 (안정화) | 352.0 MB | 336.2 MB | -15.9 MB (-4.5%) |
+| 실행 파일 | 305.9 MB | 289.9 MB | -16.0 MB (-5.2%) |
+| UClasses / UObjects | 5,811 / 38,782 | 5,573 / 36,622 | -238 / -2,160 |
+
+- **기능 손실 없음** : 전후 로그에서 새로 발생한 Warning / Error는 0건이고, 제거된 플러그인의 라이브 객체는 `Mutable` 15개, `PhysicsControl` 2개 외에는 0개입니다.
+- **절감 요인** : 실행 파일과 안정화 메모리가 같은 16 MB 줄었습니다. 런타임 힙이 아니라 링크된 코드와 시작 시점의 클래스 등록 비용이 줄어든 것입니다.
+
+측정 절차, 보고서 항목, 해석 시 유의사항, 전체 결과 표는 [SERVER_DIET.md](./Tools/SERVER_DIET.md)를 참고합니다.
 
 ---
 ## 계측과 실험 설계 ([프로파일 결과](./Tools/Profiling.md))

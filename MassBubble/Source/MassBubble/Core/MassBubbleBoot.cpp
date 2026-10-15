@@ -1,8 +1,10 @@
 #include "Core/MassBubbleBoot.h"
 
+#include "Core/MassBubbleDiet.h"
 #include "Core/MassBubbleStats.h"
 #include "MassBubble.h"
 
+#include "CoreGlobals.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/CriticalSection.h"
 #include "HAL/IConsoleManager.h"
@@ -28,6 +30,7 @@ namespace
 	FCriticalSection GBootLock;
 	TArray<FMilestone> GMilestones;
 	double GBootStart = 0.0;
+	double GProcessOffsetSec = 0.0; // process start (GStartTime) -> first milestone
 	std::atomic<uint32> GGeneration{ 0 };
 
 	FString BootCVarText(const TCHAR* Name)
@@ -46,6 +49,7 @@ void MassBubbleBoot::Mark(const TCHAR* Name)
 		if (GMilestones.Num() == 0)
 		{
 			GBootStart = Now;
+			GProcessOffsetSec = Now - GStartTime;
 		}
 		FMilestone& Milestone = GMilestones.AddDefaulted_GetRef();
 		Milestone.Name = Name;
@@ -76,6 +80,25 @@ void MassBubbleBoot::MarkOnce(const TCHAR* Name)
 uint32 MassBubbleBoot::GetGeneration()
 {
 	return GGeneration.load(std::memory_order_relaxed);
+}
+
+void MassBubbleBoot::GetTimeline(TArray<FMilestoneInfo>& OutMilestones)
+{
+	FScopeLock Lock(&GBootLock);
+
+	OutMilestones.Reset(GMilestones.Num());
+	for (const FMilestone& Milestone : GMilestones)
+	{
+		FMilestoneInfo& Info = OutMilestones.AddDefaulted_GetRef();
+		Info.Name = Milestone.Name;
+		Info.Seconds = Milestone.Seconds;
+	}
+}
+
+double MassBubbleBoot::GetProcessOffsetSec()
+{
+	FScopeLock Lock(&GBootLock);
+	return GProcessOffsetSec;
 }
 
 void MassBubbleBoot::Reset()
@@ -123,7 +146,7 @@ void MassBubbleBoot::LogIoDiagnostics()
 		TEXT("s.ForceGCAfterLevelStreamedOut"),
 		TEXT("gc.TimeBetweenPurgingPendingKillObjects"),
 		TEXT("wp.Runtime.BlockOnSlowStreaming"),
-		TEXT("wp.Runtime.MaxLoadingStreamingCells "),
+		TEXT("wp.Runtime.MaxLoadingStreamingCells"),
 		TEXT("net.IsPushModelEnabled"),
 	};
 	for (const TCHAR* Name : CVarNames)
@@ -156,7 +179,10 @@ void MassBubbleBoot::LogModules(bool bList)
 		{
 			if (Module.bIsLoaded)
 			{
-				UE_LOG(LogMassBubble, Log, TEXT("[Boot]   %s"), *Module.Name);
+				// Which plugin owns the module: the diet works on plugins, not on modules.
+				const FString Owner = MassBubbleDiet::GetModuleOwner(FName(*Module.Name));
+				const FString OwnerText = Owner.IsEmpty() ? FString(TEXT("-")) : FString::Printf(TEXT("plugin %s"), *Owner);
+				UE_LOG(LogMassBubble, Log, TEXT("[Boot]   %-40s %s"), *Module.Name, *OwnerText);
 			}
 		}
 	}

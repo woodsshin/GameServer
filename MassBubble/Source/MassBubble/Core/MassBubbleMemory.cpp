@@ -27,7 +27,7 @@ uint64 MassBubbleMem::GetProcessUsedBytes()
 void MassBubbleMem::PublishCsvMetadata()
 {
 #if defined(CSV_METADATA)
-	CSV_METADATA(TEXT("Allocator"), GMalloc->GetDescriptiveName());
+	CSV_METADATA(TEXT("Allocator"), FPlatformMemory::BaseAllocator()->GetDescriptiveName());
 #endif
 }
 
@@ -36,14 +36,14 @@ void MassBubbleMem::LogInfo()
 	const double MB = 1024.0 * 1024.0;
 	const FPlatformMemoryStats Stats = FPlatformMemory::GetStats();
 
-	UE_LOG(LogMassBubble, Log, TEXT("[Mem] allocator: %s"), GMalloc->GetDescriptiveName());
+	UE_LOG(LogMassBubble, Log, TEXT("[Mem] allocator: %s"), FPlatformMemory::BaseAllocator()->GetDescriptiveName());
 	UE_LOG(LogMassBubble, Log, TEXT("[Mem] process: physical %.1f MB used (peak %.1f MB), virtual %.1f MB used (peak %.1f MB), %.1f MB physical available"),
 		static_cast<double>(Stats.UsedPhysical) / MB, static_cast<double>(Stats.PeakUsedPhysical) / MB,
 		static_cast<double>(Stats.UsedVirtual) / MB, static_cast<double>(Stats.PeakUsedVirtual) / MB,
 		static_cast<double>(Stats.AvailablePhysical) / MB);
 	UE_LOG(LogMassBubble, Log, TEXT("[Mem] the allocator is a command line choice (-binnedmalloc2, -binnedmalloc3, -mimalloc, -ansimalloc, depending on platform and engine version). More detail: memreport -full, -llm with Memory Insights."));
 
-	GMalloc->DumpAllocatorStats(*GLog);
+	FPlatformMemory::BaseAllocator()->DumpAllocatorStats(*GLog);
 }
 
 namespace
@@ -96,7 +96,7 @@ namespace
 void MassBubbleMem::RunBench()
 {
 	const int32 NumThreads = FMath::Clamp(FPlatformMisc::NumberOfWorkerThreadsToSpawn(), 2, 8);
-	UE_LOG(LogMassBubble, Log, TEXT("[Mem] bench on %s, %d threads for the contended runs"), GMalloc->GetDescriptiveName(), NumThreads);
+	UE_LOG(LogMassBubble, Log, TEXT("[Mem] bench on %s, %d threads for the contended runs"), FPlatformMemory::BaseAllocator()->GetDescriptiveName(), NumThreads);
 
 	for (const FBenchScenario& Scenario : GScenarios)
 	{

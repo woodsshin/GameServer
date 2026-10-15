@@ -1,0 +1,183 @@
+.\Compare-ServerDiet.ps1 -Before .\DietRuns\before -After .\DietRuns\after
+
+== Server diet: before = 5 run(s) [.\DietRuns\before]
+               after  = 5 run(s) [.\DietRuns\after]
+
+Headline numbers (median of the runs)
+
+Metric                                       Before After  Delta  Delta %
+------                                       ------ -----  -----  -------
+modules loaded                               279    206    -73    -26.2%
+plugins enabled                              192    85     -107   -55.7%
+plugins with code loaded                     133    71     -62    -46.6%
+Module.*.Loaded events seen                  141    105    -36    -25.5%
+module load span (ms)                        257    229    -28    -10.8%
+Module.Phase.Default.Done (ms since process) 1,047  913    -134   -12.8%
+Engine.InitComplete (ms since process)       1,191  1,053  -137   -11.5%
+ProcessMB at hook                            273.9  258.5  -15.4  -5.6%
+ProcessMB at Engine.InitComplete             296.5  278.3  -18.2  -6.1%
+ProcessMB at report (settled)                352.0  336.2  -15.9  -4.5%
+peak physical (MB)                           767.6  751.6  -16.0  -2.1%
+virtual (MB)                                 251.3  244.6  -6.7   -2.7%
+UObjects                                     38,782 36,622 -2,160 -5.6%
+UClasses                                     5,811  5,573  -238   -4.1%
+executable (MB)                              305.9  289.9  -16.0  -5.2%
+loaded module files (MB)                     0.0    0.0    0.0    -
+
+Plugins only in BEFORE (107):
+   ActorLayerUtilities, AISupport, AlembicImporter, AndroidFileServer, AnimationData, AnimationSharing, AnimatorKit, AppleImageUtils, AssetManagerEditor, AudioInsights, AudioInsightsRuntime, AudioModulationInsights, AutomatedPerfTestTools, AutomationUtils, AvfMedia, BackChannel, BlueprintHeaderView, BlueprintMaterialTextureNodes, Bridge, Buoyancy, CameraShakePreviewer, Cascade, ChaosCloth, ChaosEditor, ChaosNiagara, ChaosSolverPlugin, ChaosVD, CharacterAI, ChunkDownloader, ColorGrading, ConcertMain, ConcertSharedSlate, ConcertSyncClient, ConcertSyncCore, ConsoleVariables, ControlRigModules, ControlRigPhysics, ControlRigSpline, CurveEditorTools, CustomMeshComponent, DatasmithContent, EaseCurveTool, EditorPerformance, EditorTRSGizmo, EnvironmentQueryEditor, ExampleDeviceProfileSelector, Fab, FacialAnimation, FileSandbox, Fracture, GeometryCollectionPlugin, GeometryDataflow, GeometryMode, GizmoFramework, GlobalConfigurationData, GLTFExporter, GooglePAD, InputDebugging, InterchangeAxfAssets, InterchangeEditor, InterchangeTests, Landmass, LauncherChunkInstaller, LevelSequenceNavigatorBridge, LightMixer, LocalizableMessage, LocationServicesBPLibrary, MaterialAssetWizard, MeshPainting, MetaHumanSDK, MobilePatchingUtils, MsQuic, Mutable, MutableAssetUserData, NFORDenoise, NiagaraPreviewContent, NiagaraSimCaching, NNEDenoiser, NNERuntimeORT, ObjectMixer, OodleNetwork, PhysicsControl, PlatformCrypto, PluginUtils, ProjectLauncher, RenderDocPlugin, ResonanceAudio, RigLogic, RuntimeTelemetry, SequencerAnimTools, SequenceValidator, SignificanceManager, SkeletalMerging, SoundFields, SpeedTreeImporter, Synthesis, TcpMessaging, ToolPresets, TraceUtilities, UdpMessaging, UMGWidgetPreview, UObjectPlugin, UVEditor, Water, WindowsDeviceProfileSelector, WindowsMoviePlayer, XInputDevice
+Plugins only in AFTER (0):
+   (none)
+Modules only in BEFORE (73), [owner plugin]:
+   ActorLayerUtilities [ActorLayerUtilities], AISupportModule [AISupport], Analytics, AndroidFileServer [AndroidFileServer], AnimationSharing [AnimationSharing], AppleImageUtils [AppleImageUtils], AudioInsightsRuntime [AudioInsightsRuntime], AutomationUtils [AutomationUtils], AvfMediaFactory [AvfMedia], BackChannel [BackChannel], Buoyancy [Buoyancy], ChaosCloth [ChaosCloth], ChaosNiagara [ChaosNiagara], ChaosVDBlueprint [ChaosVD], CharacterAI [CharacterAI], ChunkDownloader [ChunkDownloader], ConsoleVariablesEditorRuntime [ConsoleVariables], ControlRigPhysics [ControlRigPhysics], ControlRigSpline [ControlRigSpline], CustomizableObject [Mutable], CustomMeshComponent [CustomMeshComponent], DataflowMedialSkeleton [GeometryDataflow], DatasmithContent [DatasmithContent], ExampleDeviceProfileSelector [ExampleDeviceProfileSelector], FacialAnimation [FacialAnimation], FractureEngine [Fracture], GeometryCollectionDepNodes [GeometryCollectionPlugin], GeometryCollectionNodes [GeometryCollectionPlugin], GeometryCollectionTracks [GeometryCollectionPlugin], GeometryDataflowNodes [GeometryDataflow], GlobalConfigurationData [GlobalConfigurationData], GlobalConfigurationDataCore [GlobalConfigurationData], GLTFExporter [GLTFExporter], GooglePAD [GooglePAD], InputDebugging [InputDebugging], InterchangeAxFAssets [InterchangeAxfAssets], Landmass [Landmass], LauncherChunkInstaller [LauncherChunkInstaller], LocalizableMessage [LocalizableMessage], LocalizableMessageBlueprint [LocalizableMessage], LocationServicesBPLibrary [LocationServicesBPLibrary], MetaHumanSDKRuntime [MetaHumanSDK], MobilePatchingUtils [MobilePatchingUtils], MsQuicRuntime [MsQuic], MutableAssetUserData [MutableAssetUserData], MutableRuntime [Mutable], NFORDenoise [NFORDenoise], NiagaraSimCaching [NiagaraSimCaching], NNEDenoiser [NNEDenoiser], NNEDenoiserShaders [NNEDenoiser], NNERuntimeORT [NNERuntimeORT], OodleNetworkHandlerComponent [OodleNetwork], PhysicsControl [PhysicsControl], PlatformCrypto [PlatformCrypto], PlatformCryptoContext [PlatformCrypto], PlatformCryptoTypes [PlatformCrypto], RenderDocPlugin [RenderDocPlugin], ResonanceAudio [ResonanceAudio], RigLogicLib [RigLogic], RigLogicModule [RigLogic], RuntimeTelemetry [RuntimeTelemetry], SignificanceManager [SignificanceManager], SkeletalMerging [SkeletalMerging], SoundFields [SoundFields], Synthesis [Synthesis], TcpMessaging [TcpMessaging], TraceUtilities [TraceUtilities], UdpMessaging [UdpMessaging], UObjectPlugin [UObjectPlugin], Water [Water], WindowsDeviceProfileSelector [WindowsDeviceProfileSelector], WindowsMoviePlayer [WindowsMoviePlayer], XInputDevice [XInputDevice]
+Modules only in AFTER (0):
+   (none)
+
+What the removed plugins cost in the BEFORE run (module-load samples: rough, anything that ran in between is charged to the module)
+
+Plugin                        Modules loaded Live objects Content objects ~MB at load ~ms at load
+------                        -------------- ------------ --------------- ----------- -----------
+GeometryCollectionPlugin      3/5                       0               0 1.3         6
+CharacterAI                   1/1                       0               0 0.0         1
+GlobalConfigurationData       2/2                       0               0 0.0         1
+AvfMedia                      2/5                       0               0 0.0         1
+LocalizableMessage            2/2                       0               0 0.0         1
+MutableAssetUserData          1/1                       0               0 0.0         0
+ControlRigSpline              1/1                       0               0 0.0         0
+OodleNetwork                  1/1                       0               0 0.0         0
+AppleImageUtils               1/2                       0               0 0.0         0
+InputDebugging                1/2                       0               0 0.0         0
+NNEDenoiser                   2/2                       0               0 0.0         0
+GeometryDataflow              2/2                       0               0 0.0         1
+MobilePatchingUtils           1/1                       0               0 0.0         0
+RigLogic                      2/5                       0               0 0.0         0
+MetaHumanSDK                  1/3                       0               0 0.0         0
+PhysicsControl                1/3                       2               0 0.0         0
+ConsoleVariables              1/2                       0               0 0.0         0
+ChaosNiagara                  1/1                       0               0 0.0         0
+XInputDevice                  1/1                       0               0 0.0         0
+Fracture                      1/1                       0               0 0.0         0
+TraceUtilities                1/3                       0               0 0.0         0
+BackChannel                   1/1                       0               0 0.0         0
+ControlRigPhysics             1/2                       0               0 0.0         0
+SkeletalMerging               1/1                       0               0 0.0         0
+LevelSequenceNavigatorBridge  0/1                       0               0 0.0         0
+LightMixer                    0/1                       0               0 0.0         0
+LauncherChunkInstaller        1/1                       0               0 0.0         0
+Landmass                      1/2                       0               0 0.0         0
+MeshPainting                  0/2                       0               0 0.0         0
+NiagaraSimCaching             1/2                       0               0 0.0         0
+Mutable                       2/5                      15               0 0.0         0
+MsQuic                        1/1                       0               0 0.0         0
+MaterialAssetWizard           0/1                       0               0 0.0         0
+NiagaraPreviewContent         0/1                       0               0 0.0         0
+LocationServicesBPLibrary     1/1                       0               0 0.0         0
+NFORDenoise                   1/1                       0               0 0.0         0
+ToolPresets                   0/2                       0               0 0.0         0
+UdpMessaging                  1/1                       0               0 0.0         0
+UMGWidgetPreview              0/1                       0               0 0.0         0
+SpeedTreeImporter             0/1                       0               0 0.0         0
+Synthesis                     1/2                       0               0 0.0         0
+TcpMessaging                  1/1                       0               0 0.0         0
+WindowsDeviceProfileSelector  1/1                       0               0 0.0         0
+WindowsMoviePlayer            1/1                       0               0 0.0         0
+ActorLayerUtilities           1/2                       0               0 0.0         0
+UObjectPlugin                 1/1                       0               0 0.0         1
+UVEditor                      0/3                       0               0 0.0         0
+Water                         1/2                      34              10 0.0         0
+PluginUtils                   0/1                       0               0 0.0         0
+ProjectLauncher               0/2                       0               0 0.0         0
+RenderDocPlugin               1/1                       0               0 0.0         0
+NNERuntimeORT                 1/1                       2               0 0.0         0
+ObjectMixer                   0/1                       0               0 0.0         0
+PlatformCrypto                3/3                       0               0 0.0         0
+SequenceValidator             0/1                       0               0 0.0         0
+SignificanceManager           1/1                       1               0 0.0         0
+SoundFields                   1/1                       0               0 0.0         0
+ResonanceAudio                1/2                       0               0 0.0         0
+RuntimeTelemetry              1/1                       0               0 0.0         0
+SequencerAnimTools            0/1                       0               0 0.0         0
+InterchangeTests              0/2                       0               0 0.0         0
+Buoyancy                      1/1                       1               0 0.0         0
+CameraShakePreviewer          0/1                       0               0 0.0         0
+Bridge                        0/2                       0               0 0.0         0
+BlueprintHeaderView           0/1                       0               0 0.0         0
+BlueprintMaterialTextureNodes 0/1                       0               0 0.0         0
+Cascade                       0/1                       0               0 0.0         0
+ChaosVD                       1/3                       0               0 0.0         0
+ChunkDownloader               1/1                       0               0 0.0         0
+ChaosSolverPlugin             0/1                       0               0 0.0         0
+ChaosCloth                    1/2                       0               0 0.0         0
+ChaosEditor                   0/1                       0               0 0.0         0
+AutomationUtils               1/2                       0               0 0.0         0
+AnimationData                 0/1                       0               0 0.0         0
+AnimationSharing              1/2                       0               0 0.0         0
+AndroidFileServer             1/2                       0               0 0.0         0
+AISupport                     1/1                       0               0 0.0         0
+AlembicImporter               0/2                       0               0 0.0         0
+AnimatorKit                   0/1                       0               0 0.0         0
+AudioModulationInsights       0/1                       0               0 0.0         0
+AutomatedPerfTestTools        0/1                       0               0 0.0         0
+AudioInsightsRuntime          1/1                       0               0 0.0         0
+AssetManagerEditor            0/1                       0               0 0.0         0
+AudioInsights                 0/2                       0               0 0.0         0
+FacialAnimation               1/2                       0               0 0.0         0
+FileSandbox                   0/2                       0               0 0.0         0
+Fab                           0/1                       0               0 0.0         0
+EnvironmentQueryEditor        0/1                       0               0 0.0         0
+ExampleDeviceProfileSelector  1/1                       0               0 0.0         0
+GeometryMode                  0/3                       0               0 0.0         0
+InterchangeAxfAssets          1/1                       0               0 0.0         0
+InterchangeEditor             0/3                       0               0 0.0         0
+GooglePAD                     1/2                       0               0 0.0         0
+GizmoFramework                0/1                       0               0 0.0         0
+GLTFExporter                  1/1                       0               0 0.0         0
+EditorTRSGizmo                0/1                       0               0 0.0         0
+ConcertSyncClient             0/1                       0               0 0.0         0
+ConcertSyncCore               0/1                       0               0 0.0         0
+ConcertSharedSlate            0/1                       0               0 0.0         0
+ColorGrading                  0/1                       0               0 0.0         0
+ConcertMain                   0/4                       0               0 0.0         0
+ControlRigModules             0/0                       0               0 0.0         0
+EaseCurveTool                 0/1                       0               0 0.0         0
+EditorPerformance             0/3                       0               0 0.0         0
+DatasmithContent              1/2                       0               0 0.0         0
+CurveEditorTools              0/1                       0               0 0.0         0
+CustomMeshComponent           1/1                       0               0 0.0         0
+   together: about 1.4 MB, 19 ms
+   (compare with the measured delta of ProcessMB above: the difference is what the samples cannot see, e.g. UClass registration of modules that were linked but never started)
+
+Startup milestones (ms since process start, median)
+
+Milestone                        Before (ms) After (ms) Delta
+---------                        ----------- ---------- -----
+Module.MassBubble.Startup        980         866        -114
+Module.Phase.Default.Done        1,047       913        -134
+Module.Phase.PostDefault.Done    1,053       919        -134
+Module.Phase.PostEngineInit.Done 1,111       974        -137
+Engine.InitComplete              1,191       1,053      -137
+Diet.ReportDue                   16,216      16,084     -132
+
+Module.<Name>.Loaded milestones that moved most (top 15 of 105 in both; cumulative: everything after a removed module moves up too)
+
+Milestone                             Before (ms) After (ms) Delta
+---------                             ----------- ---------- -----
+Module.PerfCounters.Loaded            1,238       1,093      -145
+Module.ImgMediaFactory.Loaded         1,108       969        -139
+Module.ImageWriteQueue.Loaded         1,088       949        -139
+Module.PlanarCut.Loaded               1,107       969        -138
+Module.SessionServices.Loaded         1,106       968        -137
+Module.StreamingPauseRendering.Loaded 1,088       951        -137
+Module.MovieScene.Loaded              1,089       952        -137
+Module.MovieSceneTracks.Loaded        1,089       952        -137
+Module.CinematicCamera.Loaded         1,089       952        -137
+Module.TmvMedia.Loaded                1,109       972        -137
+Module.TakeRecorder.Loaded            1,052       915        -137
+Module.OpenExrWrapper.Loaded          1,109       972        -137
+Module.TakeTrackRecorders.Loaded      1,051       914        -137
+Module.MP4Utilities.Loaded            1,109       973        -137
+Module.MP4Muxer.Loaded                1,110       973        -137
+
+Warnings / errors only in the AFTER logs: 0   (only in BEFORE: 0)
+
+Result: modules -73  (-26.2%) | plugins -107  (-55.7%) | Engine.InitComplete -137 ms (-11.5%) | ProcessMB after init -18.2 MB (-6.1%) | ProcessMB settled -15.9 MB (-4.5%) | executable -16.0 MB (-5.2%)

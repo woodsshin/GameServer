@@ -1,6 +1,7 @@
 #include "MassBubble.h"
 
 #include "Core/MassBubbleBoot.h"
+#include "Core/MassBubbleDiet.h"
 #include "Core/MassBubbleMemory.h"
 
 #include "Modules/ModuleManager.h"
@@ -12,6 +13,7 @@ public:
 	{
 		MassBubbleBoot::Mark(TEXT("Module.MassBubble.Startup"));
 		MassBubbleMem::PublishCsvMetadata();
+		MassBubbleDiet::Install(); // -OptDietModules / -OptDietReport (no-op without them, except the Engine.InitComplete milestone)
 	}
 };
 

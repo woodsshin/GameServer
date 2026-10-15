@@ -21,6 +21,19 @@ namespace MassBubbleBoot
 	/** Changes on Reset(): call sites that record a milestone once use it to record it again. */
 	MASSBUBBLE_API uint32 GetGeneration();
 
+	/** One recorded milestone: seconds since the first milestone (module startup). */
+	struct FMilestoneInfo
+	{
+		FString Name;
+		double Seconds = 0.0;
+	};
+
+	/** Copy of the timeline in the order the milestones were recorded (the server diet report writes it out). */
+	MASSBUBBLE_API void GetTimeline(TArray<FMilestoneInfo>& OutMilestones);
+
+	/** Seconds from process start (GStartTime) to the first milestone: add it to a milestone's Seconds for time since process start. */
+	MASSBUBBLE_API double GetProcessOffsetSec();
+
 	MASSBUBBLE_API void Reset();
 	MASSBUBBLE_API FString GetReport();
 	MASSBUBBLE_API void LogIoDiagnostics();
