@@ -1119,7 +1119,7 @@ gc.IncrementalReachabilityTimeLimit=0.002
 
 ### 14. 서버 다이어트 — 사용하지 않는 플러그인 제거
 
-데디케이티드 서버는 엔진 기본 플러그인(에디터 도구, 미디어, 오디오, 모바일 등)을 그대로 로드하지만 크라우드 시뮬레이션은 이 중 대부분을 쓰지 않습니다. 서버가 로드하는 모듈과 플러그인을 `MassBubbleDiet`가 JSON 보고서로 기록하고, PowerShell 스크립트 3개(`Run-ServerDiet.ps1` · `Get-DietCandidates.ps1` · `Compare-ServerDiet.ps1`)가 실행 · 제거 후보 선별 · 전후 비교를 맡습니다. 제거 후보는 `.uproject`에서 `Enabled:false` + `TargetAllowList:["Server"]`로 서버에서만 끕니다. 클라이언트와 에디터는 영향을 받지 않습니다.
+데디케이티드 서버는 엔진 기본 플러그인(에디터 도구, 미디어, 오디오, 모바일 등)을 그대로 로드하지만 Crowd 시뮬레이션에서 이 중 대부분을 쓰지 않습니다. 서버가 로드하는 모듈과 플러그인을 `MassBubbleDiet`가 JSON 보고서로 기록하고, PowerShell 스크립트 3개(`Run-ServerDiet.ps1` · `Get-DietCandidates.ps1` · `Compare-ServerDiet.ps1`)를 실행 · 제거 후보 선별 · 전후 비교를 맡습니다. 제거 후보는 `.uproject`에서 `Enabled:false` + `TargetAllowList:["Server"]`로 서버에서만 비활성화합니다. 클라이언트와 에디터는 영향을 받지 않습니다.
 
 `-OptBots=8` 서버를 라벨당 5회 실행한 중앙값 (웜업 1회 제외):
 
