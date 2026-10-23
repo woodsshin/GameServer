@@ -973,7 +973,7 @@ flowchart LR
 | `s.UnregisterComponentsTimeLimit` | 1.0 | 공통 | 프레임당 RemoveFromWorld(셀의 컴포넌트 해제) 시간 제한 (ms) |
 | `s.LevelStreamingComponentsUnregistrationGranularity` | 2 | 공통 | 프레임 시간 체크 주기당 해제하는 컴포넌트 수 |
 | `wp.Runtime.BlockOnSlowStreaming` | 0 | 데디케이티드 서버 | 셀이 아직 로딩 중이어도 서버 틱(= 모든 플레이어)을 멈추지 않음 |
-| `wp.Runtime.MaxLoadingLevelStreamingCells` | 2 | 데디케이티드 서버 | 동시에 로딩하는 셀 수 제한 → PostLoad / 등록 작업의 burst 축소 |
+| `wp.Runtime.MaxLoadingStreamingCells` | 2 | 데디케이티드 서버 | 동시에 로딩하는 셀 수 제한 → PostLoad / 등록 작업의 burst 축소 |
 
 ```cpp
 // Core/MassBubbleRuntimeConfig.cpp — ApplyStreamingProfile (요약)

@@ -914,7 +914,7 @@ During engine level streaming, the load / unload work of a single cell is spread
 | `s.UnregisterComponentsTimeLimit` | 1.0 | Common | Per-frame time limit (ms) for RemoveFromWorld (unregistering a cell's components) |
 | `s.LevelStreamingComponentsUnregistrationGranularity` | 2 | Common | Number of components unregistered between clock checks |
 | `wp.Runtime.BlockOnSlowStreaming` | 0 | Dedicated server | Does not stall the server tick (= all players) even if a cell is still loading |
-| `wp.Runtime.MaxLoadingLevelStreamingCells` | 2 | Dedicated server | Limits the number of cells loading at once → reduces bursts of PostLoad / registration work |
+| `wp.Runtime.MaxLoadingStreamingCells` | 2 | Dedicated server | Limits the number of cells loading at once → reduces bursts of PostLoad / registration work |
 
 ```cpp
 // Core/MassBubbleRuntimeConfig.cpp — ApplyStreamingProfile (abridged)
