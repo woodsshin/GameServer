@@ -14,7 +14,7 @@ Network Programming과 Game Engine Middleware를 중심으로 한 프로젝트 �
 | [UnrealPlugins/SimpleUPNP](./UnrealPlugins/SimpleUPNP/README.md) | UPnP IGD Protocol로 Router에 Port Forwarding을 자동 등록하는 Native Code Plugin | Unreal Engine, C++, SSDP/SOAP |
 | [Kiraverse](./Kiraverse/README.md) | Unreal Engine 5.4의 Gameplay Ability System(GAS) 기반 C++ 멀티플레이어 게임플레이 코어. Hitscan/Projectile 무기 교체 구조와 폭탄 설치·해체(Bomb Defusal) 라운드 루프, 봇 PvP 구현 | Unreal Engine, C++, Gameplay Ability System |
 | [MassBubble](./MassBubble/README.md) | PCG + Mass Entity 기반 대규모 NPC 서버 시뮬레이션(LOD·time-slicing·병렬 처리)과 플레이어별 AOI 복제(Iris·Push Model·FastArray·Dead reckoning·10 B 양자화), 클라이언트 ISM 배치 렌더링 | Unreal Engine 5.8, C++, PCG, Mass Entity, World Partition, Iris, Push Model Replication |
-
+| [IrisBubble](./IrisBubble/README.md) | 기존 MassBubble 프로젝트에서 MassEntity를 제거하고 수천 명의 군중 시뮬레이션을 리전(Region) 단위 액터와 Iris Spatial Filter 기반으로 전환하여 서버 CPU 성능을 대폭 최적화한 성능 비교 | Unreal Engine 5.8, C++, PCG, World Partition, Iris, Push Model Replication |
 ---
 
 ## 포트폴리오 개요 및 핵심 관점

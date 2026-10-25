@@ -1,0 +1,658 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.8",
+	"Category": "",
+	"Description": "UE5 open-world multiplayer optimization showcase: World Partition Iris, server-authoritative, dedicated-server friendly.",
+	"Modules": [
+		{
+			"Name": "MassBubble",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "MassBubbleRender",
+			"Type": "ClientOnly",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "Iris",
+			"Enabled": true
+		},
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "CharacterAI",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AvfMedia",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "GlobalConfigurationData",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "LocalizableMessage",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "MutableAssetUserData",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ControlRigSpline",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "InputDebugging",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AppleImageUtils",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "OodleNetwork",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "NNEDenoiser",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "MetaHumanSDK",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ConsoleVariables",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "MobilePatchingUtils",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "TraceUtilities",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ChaosNiagara",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ControlRigPhysics",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "XInputDevice",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "BackChannel",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "UObjectPlugin",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AutomationUtils",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "GooglePAD",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ChaosVD",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AudioInsightsRuntime",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ActorLayerUtilities",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AISupport",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AlembicImporter",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AndroidFileServer",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AnimationData",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AnimationSharing",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AnimatorKit",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AssetManagerEditor",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AudioInsights",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AudioModulationInsights",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "AutomatedPerfTestTools",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "BlueprintHeaderView",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "Bridge",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "CameraShakePreviewer",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "Cascade",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ChaosCloth",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ChaosEditor",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ChaosSolverPlugin",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ChunkDownloader",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ColorGrading",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ControlRigModules",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "CurveEditorTools",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "CustomMeshComponent",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "DatasmithContent",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "EaseCurveTool",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "EditorPerformance",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "EditorTRSGizmo",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "EnvironmentQueryEditor",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ExampleDeviceProfileSelector",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "Fab",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "FacialAnimation",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "GeometryMode",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "GLTFExporter",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "InterchangeAxfAssets",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "InterchangeEditor",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "InterchangeTests",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "LauncherChunkInstaller",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "LevelSequenceNavigatorBridge",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "LightMixer",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "LocationServicesBPLibrary",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "MaterialAssetWizard",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "MeshPainting",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "MsQuic",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "NFORDenoise",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "NiagaraPreviewContent",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "NiagaraSimCaching",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ObjectMixer",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "PlatformCrypto",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "PluginUtils",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ProjectLauncher",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "RenderDocPlugin",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ResonanceAudio",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "RuntimeTelemetry",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "SequencerAnimTools",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "SequenceValidator",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "SoundFields",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "SpeedTreeImporter",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "Synthesis",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "TcpMessaging",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "ToolPresets",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "UdpMessaging",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "UMGWidgetPreview",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "UVEditor",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "WindowsDeviceProfileSelector",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		},
+		{
+			"Name": "WindowsMoviePlayer",
+			"Enabled": false,
+			"TargetAllowList": [
+				"Server"
+			]
+		}
+	],
+	"TargetPlatforms": [
+		"Windows",
+		"Linux"
+	]
+}
