@@ -22,8 +22,26 @@
 ### 주요 결과요약
 
 * **서버 복제 판단 CPU 오버헤드 감소:** 기본 설정 틱당 139 µs → 26 µs (1명, 5.3배 개선), 3,491 µs → 57 µs (32명 집중, 61.6배 개선), 5,261 µs → 1,119 µs (32명 분산, 4.7배 개선).
+  * 2개의 봇, 1개의 클라이언트로 테스트
+<p align="center">
+  <img src="Image/MassEntity_FrameTime.PNG" alt="MassEntity ProcessingPhase" width="1259"><br>
+  <sub>MassEntity ProcessingPhase · 500.2 µs</sub>
+</p>
+<p align="center">
+  <img src="Image/Iris_ReplicationSystem_FrameTime.PNG" alt="Iris ReplicationSystem" width="1259"><br>
+  <sub>Iris ReplicationSystem NetUpdate · 283.4 µs</sub>
+</p>
 
 * **클라이언트당 전송량 증가:** 레거시 반경 내 400개 전송(약 2.4 KB/s) 대비 Iris scope 단위 리전 전송으로 기본 설정 기준 11.6\~15.8 KB/s 전송 (복제 반경 조정 시 최소 5.8 KB/s).
+  * 2개의 봇, 1개의 클라이언트로 테스트
+<p align="center">
+  <img src="Image/MassEntity_network.PNG" alt="MassEntity ProcessingPhase" width="1259"><br>
+  <sub>MassEntity + IrisFastArray · 평균 2.5 KB/s</sub>
+</p>
+<p align="center">
+  <img src="Image/Iris_ReplicationSystem_network.PNG" alt="Iris ReplicationSystem" width="1259"><br>
+  <sub>IrisFastArray Only · 평균 6.8 KB/s</sub>
+</p>
 
 * **서버 CPU 성능 우선**: **Iris 방식**이 플레이어 밀집 환경에서도 CPU 병목 없이 훨씬 효율적입니다.
 

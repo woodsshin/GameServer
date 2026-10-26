@@ -22,8 +22,26 @@ A comparison document analyzing two implementation approaches for MassBubble, wh
 ### Key Results Summary
 
 * **Server Replication Overhead Reduction:** 139 µs → 26 µs per tick (1 player, 5.3x improvement), 3,491 µs → 57 µs (32 dense players, 61.6x improvement), 5,261 µs → 1,119 µs (32 dispersed players, 4.7x improvement).
+  * Tested with 2 bots and 1 client
+<p align="center">
+  <img src="Image/MassEntity_FrameTime.PNG" alt="MassEntity ProcessingPhase" width="1259"><br>
+  <sub>MassEntity ProcessingPhase · 500.2 µs</sub>
+</p>
+<p align="center">
+  <img src="Image/Iris_ReplicationSystem_FrameTime.PNG" alt="Iris ReplicationSystem" width="1259"><br>
+  <sub>Iris ReplicationSystem NetUpdate · 283.4 µs</sub>
+</p>
 
 * **Increased Per-Client Bandwidth:** Replaces legacy fixed 400-agent radius (~2.4 KB/s) with scope-based region transmission (11.6–15.8 KB/s under default settings, configurable down to 5.8 KB/s).
+  * Tested with 2 bots and 1 client
+<p align="center">
+  <img src="Image/MassEntity_network.PNG" alt="MassEntity ProcessingPhase" width="1259"><br>
+  <sub>MassEntity + IrisFastArray · Avg 2.5 KB/s</sub>
+</p>
+<p align="center">
+  <img src="Image/Iris_ReplicationSystem_network.PNG" alt="Iris ReplicationSystem" width="1259"><br>
+  <sub>IrisFastArray Only · Avg 6.8 KB/s</sub>
+</p>
 
 * **Server CPU Performance Priority:** The **Iris implementation** is significantly more efficient in high-density player environments, eliminating CPU bottlenecks.
 
