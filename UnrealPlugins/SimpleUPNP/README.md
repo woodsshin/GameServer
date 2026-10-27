@@ -108,7 +108,7 @@ void FDiscoverDevices::ParseService(FString &Service, IGDData &localIGDDATAs)
 
 <p align="center">
   <img src="Image/devicestatus.png" alt="Devicestatus" width="1067"><br>
-  <sub>Manufacturer</sub>
+  <sub>Device status</sub>
 </p>
 
 ### 2-3. Control — SOAP Action (Port Mapping 핵심 로직)
@@ -166,8 +166,8 @@ TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> FDiscoverDevices::CreateSoapReques
 이 Request가 성공하면 공유기 NAT Table에 `External Port → (내PC Private IP):Internal Port` Mapping이 즉시 등록되고, 이후로는 외부에서 `Public IP:External Port`로 들어온 Packet이 곧장 내 게임 Client로 전달됩니다 — Relay 서버를 경유하지 않는 순수 P2P Path가 Open되는 순간입니다.
 
 <p align="center">
-  <img src="Image/portmapping.png" alt="Devicestatus" width="1067"><br>
-  <sub>Manufacturer</sub>
+  <img src="Image/portmapping.png" alt="Port mapping" width="1067"><br>
+  <sub>Port mapping</sub>
 </p>
 
 ### 2-4. State Machine & Retry

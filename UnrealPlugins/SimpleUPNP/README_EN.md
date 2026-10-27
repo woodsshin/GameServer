@@ -108,7 +108,7 @@ Instead of a full XML parser, a lightweight custom parser (`ExtractMessage`) tha
 
 <p align="center">
   <img src="Image/devicestatus.png" alt="Devicestatus" width="1067"><br>
-  <sub>Manufacturer</sub>
+  <sub>Device status</sub>
 </p>
 
 ### 2-3. Control — SOAP Action (the Core Port-Mapping Logic)
@@ -166,8 +166,8 @@ TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> FDiscoverDevices::CreateSoapReques
 Once this request succeeds, the router's NAT table immediately registers an `External Port → (my PC's private IP):Internal Port` mapping, and from then on any packet arriving from the outside at `Public IP:External Port` is forwarded straight to my game client — the moment a pure P2P path opens without going through a relay server.
 
 <p align="center">
-  <img src="Image/portmapping.png" alt="Devicestatus" width="1067"><br>
-  <sub>Manufacturer</sub>
+  <img src="Image/portmapping.png" alt="Portmapping" width="1067"><br>
+  <sub>Port mapping</sub>
 </p>
 
 ### 2-4. State Machine & Retry
