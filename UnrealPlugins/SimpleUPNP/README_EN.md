@@ -77,6 +77,11 @@ void FDiscoverDevices::ParseMessage(FString &Message)
 }
 ```
 
+<p align="center">
+  <img src="Image/manufacturer.png" alt="Manufacturer" width="1067"><br>
+  <sub>Manufacturer</sub>
+</p>
+
 ### 2-2. Description — Parsing the Device XML
 
 An HTTP GET to the `LOCATION` URL returns the device's list of services (XML). From this, the `controlURL` of the `WANIPConnection` / `WANPPPConnection` service — the one actually responsible for port mapping — is extracted for use in subsequent SOAP calls.
@@ -100,6 +105,11 @@ void FDiscoverDevices::ParseService(FString &Service, IGDData &localIGDDATAs)
 ```
 
 Instead of a full XML parser, a lightweight custom parser (`ExtractMessage`) that simply extracts the string between tags is used, avoiding a dependency on an external XML library and flexibly handling the slightly different response formats found across embedded/router firmwares.
+
+<p align="center">
+  <img src="Image/devicestatus.png" alt="Devicestatus" width="1067"><br>
+  <sub>Manufacturer</sub>
+</p>
 
 ### 2-3. Control — SOAP Action (the Core Port-Mapping Logic)
 
@@ -154,6 +164,11 @@ TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> FDiscoverDevices::CreateSoapReques
 ```
 
 Once this request succeeds, the router's NAT table immediately registers an `External Port → (my PC's private IP):Internal Port` mapping, and from then on any packet arriving from the outside at `Public IP:External Port` is forwarded straight to my game client — the moment a pure P2P path opens without going through a relay server.
+
+<p align="center">
+  <img src="Image/portmapping.png" alt="Devicestatus" width="1067"><br>
+  <sub>Manufacturer</sub>
+</p>
 
 ### 2-4. State Machine & Retry
 

@@ -15,7 +15,7 @@ Unreal Engine Marketplace에 등록된 **Native Code Plugin**입니다.
 | Relay 서버 | 모든 Packet을 중계 서버가 대신 전달 | 서버 비용, Latency 증가 |
 | **UPnP/NAT-PMP** | **게임이 공유기에게 "이 Port 좀 열어줘"라고 자동 Request** | 공유기가 UPnP를 지원/활성화해야 함 |
 
-**UPnP(Universal Plug and Play)**는 이 세 번째 방법을 표준화한 Protocol입니다. Home Network 안의 기기들이 서로를 자동으로 찾고(Discovery), 서비스를 제어(Control)할 수 있게 해주는데, 그중 인터넷 공유기가 구현하는 **IGD(Internet Gateway Device)** Profile을 이용하면 Application이 직접 Port Mapping을 추가/삭제할 수 있습니다.
+<b>UPnP(Universal Plug and Play)</b>는 이 세 번째 방법을 표준화한 Protocol입니다. Home Network 안의 기기들이 서로를 자동으로 찾고(Discovery), 서비스를 제어(Control)할 수 있게 해주는데, 그중 인터넷 공유기가 구현하는 **IGD(Internet Gateway Device)** Profile을 이용하면 Application이 직접 Port Mapping을 추가/삭제할 수 있습니다.
 
 이 Plugin은 정확히 이 IGD Profile을 구현해서, 게임이 실행되는 순간 자동으로 "내 게임 Port를 외부로 열어달라"고 공유기에 Request하고, 성공하면 Relay 서버 없이 P2P로 다른 Player가 접속할 수 있게 됩니다.
 
@@ -77,6 +77,11 @@ void FDiscoverDevices::ParseMessage(FString &Message)
 }
 ```
 
+<p align="center">
+  <img src="Image/manufacturer.png" alt="Manufacturer" width="1067"><br>
+  <sub>Manufacturer</sub>
+</p>
+
 ### 2-2. Description — 기기 XML Parsing
 
 `LOCATION` URL로 HTTP GET을 보내면 기기의 Service 목록(XML)이 내려옵니다. 여기서 실제 Port Mapping을 담당하는 `WANIPConnection` / `WANPPPConnection` Service의 `controlURL`을 추출해 이후 SOAP 호출에 사용합니다.
@@ -100,6 +105,11 @@ void FDiscoverDevices::ParseService(FString &Service, IGDData &localIGDDATAs)
 ```
 
 정규 XML Parser 대신 Tag 사이 문자열을 잘라내는 경량 Parser(`ExtractMessage`)를 직접 구현해, 별도 XML Library 의존성 없이 Embedded/공유기 Firmware별로 조금씩 다른 Response Format에도 유연하게 대응합니다.
+
+<p align="center">
+  <img src="Image/devicestatus.png" alt="Devicestatus" width="1067"><br>
+  <sub>Manufacturer</sub>
+</p>
 
 ### 2-3. Control — SOAP Action (Port Mapping 핵심 로직)
 
@@ -154,6 +164,11 @@ TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> FDiscoverDevices::CreateSoapReques
 ```
 
 이 Request가 성공하면 공유기 NAT Table에 `External Port → (내PC Private IP):Internal Port` Mapping이 즉시 등록되고, 이후로는 외부에서 `Public IP:External Port`로 들어온 Packet이 곧장 내 게임 Client로 전달됩니다 — Relay 서버를 경유하지 않는 순수 P2P Path가 Open되는 순간입니다.
+
+<p align="center">
+  <img src="Image/portmapping.png" alt="Devicestatus" width="1067"><br>
+  <sub>Manufacturer</sub>
+</p>
 
 ### 2-4. State Machine & Retry
 
