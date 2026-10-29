@@ -1069,17 +1069,17 @@ gc.IncrementalReachabilityTimeLimit=0.002
 
 <p align="center">
   <img src="Image/UnrealInsight_GC_Frame_1.PNG" alt="Unreal Insights - GC 1프레임째" width="1135"><br>
-  <sub>1프레임째 (Csv 2471) — GC 시작: 도달성 분석 · 수집, <code>ConditionalCollectGarbage</code> 9.98 ms</sub>
+  <sub>프레임 1(Csv 2471) — GC 시작: 도달성 분석 · 수집, <code>ConditionalCollectGarbage</code> 9.98 ms</sub>
 </p>
 
 <p align="center">
   <img src="Image/UnrealInsight_GC_Frame_2.PNG" alt="Unreal Insights - GC 2프레임째" width="1128"><br>
-  <sub>2프레임째 (Csv 2472) — <code>IncrementalPurgeGarbage</code> 646.3 µs</sub>
+  <sub>프레임 2(Csv 2472) — <code>IncrementalPurgeGarbage</code> 646.3 µs</sub>
 </p>
 
 <p align="center">
   <img src="Image/UnrealInsight_GC_Frame_3.PNG" alt="Unreal Insights - GC 3프레임째" width="1126"><br>
-  <sub>3프레임째 (Csv 2473) — <code>IncrementalPurgeGarbage</code> 174.3 µs로 마무리</sub>
+  <sub>프레임 3(Csv 2473) — <code>IncrementalPurgeGarbage</code> 174.3 µs로 마무리</sub>
 </p>
 - <b>A/B</b> : Incremental GC 없이 비교하려면 `DefaultEngine.ini`에서 `gc.AllowIncrementalReachability` · `gc.AllowIncrementalGather`를 0으로 바꿔 다시 실행하고, 같은 절차(`opt.hitch.LogMs` · Insights)로 측정합니다.
 
