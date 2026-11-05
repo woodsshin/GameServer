@@ -54,7 +54,7 @@ Seedworld는 두 가지 매치메이킹/서버 배치 경로를 동시에 지원
 
 **파일**: `SeedworldGrpcSubsystem.cpp`, `SeedworldDSGrpcSubsystem.cpp`
 
-클라이언트/서버 각각의 게임 인스턴스 서브시스템으로, gRPC 엔드포인트를 런타임에 HTTP로 조회(서비스 디스커버리)하고, 요청받은 서비스들을 지연 커넥트하는 큐잉 구조를 갖습니다. 여러 곳에서 동시에 같은 서비스를 요청해도 `TMultiMap`으로 델리게이트를 모아뒀다가 서비스가 `Ready` 상태가 되는 순간 한 번에 콜백을 발사합니다.
+클라이언트/서버 각각의 게임 인스턴스 서브시스템으로, gRPC 엔드포인트를 런타임에 HTTP로 조회(서비스 디스커버리)하고, 요청받은 서비스들을 지연 커넥트하는 큐잉 구조를 갖습니다. 여러 곳에서 동시에 같은 서비스를 요청해도 `TMultiMap`으로 델리게이트를 모아뒀다가 서비스가 `Ready` 상태가 되는 순간 한 번에 콜백을 호출합니다.
 
 ```cpp
 void USeedworldGrpcSubsystem::ConnectRequestedServices()
